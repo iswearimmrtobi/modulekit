@@ -29,6 +29,10 @@ public final class DependencyGraph {
         this.topologicalOrder = topologicalOrder;
     }
 
+    public static DependencyGraph build(List<ModuleDescriptor> descriptorList) {
+        return build(descriptorList, Set.of());
+    }
+
     /**
      * Build a dependency graph.
      *
@@ -39,10 +43,6 @@ public final class DependencyGraph {
      *                         they are ignored when checking for missing providers and do not
      *                         create edges in the dependency graph.
      */
-    public static DependencyGraph build(List<ModuleDescriptor> descriptorList) {
-        return build(descriptorList, Set.of());
-    }
-
     public static DependencyGraph build(List<ModuleDescriptor> descriptorList, Set<Class<?>> externalServices) {
         Map<String, ModuleDescriptor> descriptors = new LinkedHashMap<>();
         for (ModuleDescriptor d : descriptorList) {
