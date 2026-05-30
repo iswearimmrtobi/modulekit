@@ -17,6 +17,7 @@ allprojects {
 
 subprojects {
     apply(plugin = "java-library")
+    apply(plugin = "maven-publish")
 
     group = "gg.cubix"
     version = rootProject.version
@@ -28,12 +29,12 @@ subprojects {
     tasks.withType<JavaCompile> {
         options.encoding = "UTF-8"
     }
-}
 
-publishing {
-    publications {
-        create<MavenPublication>("maven") {
-            from(components["java"])
+    publishing {
+        publications {
+            create<MavenPublication>("maven") {
+                from(components["java"])
+            }
         }
     }
 }

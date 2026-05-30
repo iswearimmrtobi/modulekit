@@ -26,6 +26,14 @@ public class ModuleManager<M extends Module<S>, S extends Enum<S>> {
         this.faultyState = faultyState;
     }
 
+    /**
+     * Override to declare service types that are pre-registered in the platform registry
+     * (e.g. JavaPlugin) so the dependency graph does not fault modules that require them.
+     */
+    protected Set<Class<?>> externalServices() {
+        return Set.of();
+    }
+
     public void discover(ClassLoader loader) {
         List<ServiceLoaderDiscovery.DiscoveredModule> found = ServiceLoaderDiscovery.discover(loader, logger);
 
@@ -33,7 +41,7 @@ public class ModuleManager<M extends Module<S>, S extends Enum<S>> {
             .map(ServiceLoaderDiscovery.DiscoveredModule::descriptor)
             .toList();
 
-        DependencyGraph graph = DependencyGraph.build(descriptors);
+        DependencyGraph graph = DependencyGraph.build(descriptors, externalServices());
 
         // first-wins on duplicate ids, consistent with DependencyGraph behaviour
         Map<String, ServiceLoaderDiscovery.DiscoveredModule> byId = new LinkedHashMap<>();

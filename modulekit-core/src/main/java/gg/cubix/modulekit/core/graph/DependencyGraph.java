@@ -29,7 +29,21 @@ public final class DependencyGraph {
         this.topologicalOrder = topologicalOrder;
     }
 
+    /**
+     * Build a dependency graph.
+     *
+     * @param descriptorList   all discovered module descriptors
+     * @param externalServices service types that are already satisfied without a provider module
+     *                         (e.g. JavaPlugin pre-registered by the platform adapter).
+     *                         Modules may declare these in {@code requires} for DI purposes;
+     *                         they are ignored when checking for missing providers and do not
+     *                         create edges in the dependency graph.
+     */
     public static DependencyGraph build(List<ModuleDescriptor> descriptorList) {
+        return build(descriptorList, Set.of());
+    }
+
+    public static DependencyGraph build(List<ModuleDescriptor> descriptorList, Set<Class<?>> externalServices) {
         Map<String, ModuleDescriptor> descriptors = new LinkedHashMap<>();
         for (ModuleDescriptor d : descriptorList) {
             descriptors.put(d.id(), d);
@@ -59,6 +73,7 @@ public final class DependencyGraph {
             moduleDependencies.put(d.id(), new LinkedHashSet<>());
             if (faultReasons.containsKey(d.id())) continue;
             for (Class<?> required : d.requires()) {
+                if (externalServices.contains(required)) continue; // satisfied externally, no edge needed
                 String provider = serviceProviders.get(required);
                 if (provider == null) {
                     faultReasons.put(d.id(), "no provider found for required service " + required.getName());
