@@ -24,7 +24,7 @@ class ServiceLoaderDiscoveryTest {
     // We test it with a plain class to verify the reflection logic is correct.
 
     static class PureStaticDescriptor {
-        public static ModuleDescriptor descriptor() { return new ModuleDescriptor("static-id", "Static"); }
+        public static ModuleDescriptor getDescriptor() { return new ModuleDescriptor("static-id", "Static"); }
     }
 
     // ── No-arg constructor fallback path ─────────────────────────────────────

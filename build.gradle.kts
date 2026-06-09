@@ -23,7 +23,7 @@ subprojects {
     version = rootProject.version
 
     java {
-        toolchain.languageVersion.set(JavaLanguageVersion.of(21))
+        toolchain.languageVersion.set(JavaLanguageVersion.of(25))
     }
 
     tasks.withType<JavaCompile> {

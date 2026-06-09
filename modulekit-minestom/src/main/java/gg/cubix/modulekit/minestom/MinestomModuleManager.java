@@ -2,20 +2,21 @@ package gg.cubix.modulekit.minestom;
 
 import gg.cubix.modulekit.core.container.InjectionResolver;
 import gg.cubix.modulekit.core.container.ModuleManager;
-import net.minestom.server.extensions.Extension;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.logging.Logger;
 
 public class MinestomModuleManager extends ModuleManager<MinestomModule, MinestomModuleState> {
 
     private final MinestomLoadContextFactory contextFactory;
 
-    public MinestomModuleManager(Extension extension) {
+    public MinestomModuleManager(Path dataDirectory, Logger logger) {
         super(MinestomModuleState.DISABLED, MinestomModuleState.FAULTY);
         this.contextFactory = new MinestomLoadContextFactory(
-            extension.getDataDirectory(),
-            extension.getLogger()
+            dataDirectory,
+            logger
         );
         this.logger = contextFactory.logger();
     }
