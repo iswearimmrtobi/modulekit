@@ -1,7 +1,5 @@
 package gg.cubix.modulekit.minestom;
 
-import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
@@ -21,11 +19,6 @@ public final class MinestomLoadContextFactory {
 
     public MinestomLoadContext create(String moduleId) {
         Path moduleDir = rootDataDirectory.resolve(moduleId);
-        try {
-            Files.createDirectories(moduleDir);
-        } catch (IOException e) {
-            rootLogger.warning("[modulekit] Failed to create data folder for '" + moduleId + "': " + e.getMessage());
-        }
         return new MinestomLoadContext(
             moduleId,
             moduleDir,
