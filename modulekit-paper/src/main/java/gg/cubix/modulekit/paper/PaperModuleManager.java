@@ -2,6 +2,9 @@ package gg.cubix.modulekit.paper;
 
 import gg.cubix.modulekit.core.container.InjectionResolver;
 import gg.cubix.modulekit.core.container.ModuleManager;
+import io.papermc.paper.command.brigadier.BasicCommand;
+import io.papermc.paper.command.brigadier.CommandSourceStack;
+import io.papermc.paper.command.brigadier.Commands;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.ArrayList;
@@ -9,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.BiConsumer;
 
 /**
  * ModuleManager specialised for Paper plugins.
@@ -131,6 +135,23 @@ public class PaperModuleManager extends ModuleManager<PaperModule, PaperModuleSt
     /** Pre-register a service so modules can declare {@code requires(type)} for it. */
     public <T> void registerService(Class<T> type, T instance) {
         contextFactory.registry().put(type, instance);
+    }
+
+    /**
+     * Registers every module's {@link PaperModule#commands()} with {@code registrar}.
+     * Commands not marked {@code bypassModuleGuard} are wrapped in a {@link ModuleAwareCommand}
+     * that invokes {@code onBlocked} instead of delegating while the owning module isn't enabled.
+     */
+    public void registerCommands(Commands registrar, BiConsumer<CommandSourceStack, String> onBlocked) {
+        for (var ctx : contexts()) {
+            PaperModule pm = ctx.module();
+            for (CommandRegistration cr : pm.commands()) {
+                BasicCommand handler = cr.bypassModuleGuard()
+                        ? cr.command()
+                        : new ModuleAwareCommand(this, ctx.descriptor().id(), cr.command(), onBlocked);
+                registrar.register(cr.name(), cr.description(), cr.aliases(), handler);
+            }
+        }
     }
 
     @Override
