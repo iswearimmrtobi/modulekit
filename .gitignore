@@ -13,7 +13,3 @@ out/
 # OS
 .DS_Store
 Thumbs.db
-
-# markdown
-*.md
-!README.md
