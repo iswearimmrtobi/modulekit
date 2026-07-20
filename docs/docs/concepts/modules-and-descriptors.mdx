@@ -1,0 +1,191 @@
+---
+sidebar_position: 2
+title: Modules & Descriptors
+---
+
+# Modules & Descriptors
+
+Everything in ModuleKit is built on two types from `modulekit-api`: the `Module`
+base class and the `ModuleDescriptor` record. This page explains both in full —
+what every field and method means, and why they are shaped the way they are.
+
+## `Module<S>`
+
+`Module` is the abstract base class every module extends. Here it is in its
+entirety — it is deliberately tiny:
+
+```java title="modulekit-api / Module.java"
+public abstract class Module<S extends Enum<S>> {
+
+    private S state;
+
+    public abstract ModuleDescriptor descriptor();
+
+    public S state()             { return state; }
+    public void setState(S state){ this.state = state; }
+}
+```
+
+Three things to understand:
+
+### 1. It is generic over a state enum `S`
+
+`Module<S extends Enum<S>>` means each module carries a state value from an enum
+**you** choose. ModuleKit's core does not define states like `ENABLED` or
+`DISABLED` — it only stores whatever `S` the current phase set. This is what lets
+different adapters have different lifecycles:
+
+- Paper uses `PaperModuleState { DISABLED, LOADED, ENABLED, FAULTY }`.
+- Minestom uses `MinestomModuleState { DISABLED, INITIALIZED, FAULTY }`.
+
+You rarely touch `S` directly. On an adapter you extend `PaperModule` /
+`MinestomModule`, which fix `S` for you. Full detail:
+[Lifecycle & States](./lifecycle-and-states.mdx).
+
+### 2. The only abstract method is `descriptor()`
+
+Every module must return its `ModuleDescriptor`. That is the module's declaration
+of identity and dependencies — see below.
+
+### 3. `state` / `setState` are managed *for* you
+
+You generally do not call `setState` yourself. The manager and the per-module
+`ModuleContext` update it as the module moves through phases. You *read* `state()`
+— for example, the Paper command guard checks whether a module is `ENABLED` before
+letting its command run.
+
+:::note Lifecycle methods aren't on `Module`
+Notice `Module` has **no** `onLoad` / `onEnable` / `onDisable`. Those are defined by
+each adapter's base class, because their signatures differ per platform (Paper's
+`onLoad()` takes no argument; the raw contract's `onLoad(LoadContext)` does). The
+core engine only needs `descriptor()` and the state accessors. Lifecycle shape is
+an adapter concern.
+:::
+
+## `ModuleDescriptor`
+
+The descriptor is an immutable record describing one module. It is the single
+source of truth the dependency graph reads.
+
+```java title="modulekit-api / ModuleDescriptor.java"
+public record ModuleDescriptor(
+    String id,
+    String displayName,
+    List<Class<?>> provides,
+    List<Class<?>> requires,
+    boolean system
+) { ... }
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | Unique, stable identifier (`"reporting"`). Used for lookups, logs, fault reports, and the module's data folder name. **Must not be null or blank** — the constructor throws otherwise. |
+| `displayName` | Human-friendly name (`"Reporting"`). For logs and admin UIs. |
+| `provides` | The service **types** this module publishes for others to consume. |
+| `requires` | The service **types** this module needs injected. Drives ordering *and* constructor injection. |
+| `system` | A load-order priority hint. See [`system()` priority](#system-priority). |
+
+Both list fields are defensively copied with `List.copyOf(...)` in the compact
+constructor, so a descriptor is genuinely immutable once built.
+
+### Build it with the builder
+
+You almost always use the fluent builder rather than the raw constructor:
+
+```java
+ModuleDescriptor.builder("reporting", "Reporting")
+    .requires(DatabaseService.class, AuthService.class)
+    .provides(ReportingService.class)
+    .system()   // optional
+    .build();
+```
+
+- `requires(Class... )` / `provides(Class...)` accept varargs and replace the list
+  (calling twice does not append).
+- `system()` sets the flag to `true`.
+- `build()` re-validates that `id` is non-blank.
+
+There is also a two-argument convenience constructor
+`new ModuleDescriptor("id", "Name")` that leaves `provides`/`requires` empty and
+`system` false — handy for a module with no dependencies.
+
+### `provides`: what you offer
+
+Listing a type in `provides` is a **promise**: "during my `onLoad`, I will
+`ctx.register(ThatType.class, impl)`." The dependency graph uses `provides` to know
+which module satisfies another module's `requires`.
+
+:::warning provides is a declaration, not the registration
+Declaring `.provides(ReportingService.class)` does **not** register anything by
+itself. You still have to call `ctx.register(ReportingService.class, impl)` in
+`onLoad`. If you declare it but never register it, consumers will be ordered after
+you but then fail injection because the service isn't in the registry. Declare and
+register the same types.
+:::
+
+Two modules that `provides` the **same type** is a conflict: the first one
+discovered wins, the second is marked faulty with a "duplicate provider" reason.
+See [Dependency Graph](./dependency-graph.mdx#duplicate-providers).
+
+### `requires`: what you need
+
+Listing a type in `requires` does two jobs at once:
+
+1. **Ordering** — it creates a dependency edge, so the provider loads first.
+2. **Injection** — it defines the set of parameter types your constructor must
+   take.
+
+The relationship between `requires` and your constructor is strict and important
+enough to have its own page: [Dependency Injection](./dependency-injection.mdx).
+The short version:
+
+```java
+// requires(DatabaseService.class, AuthService.class)
+//   ⇕ must match (as a set — order doesn't matter)
+public ReportingModule(DatabaseService db, AuthService auth) { ... }
+```
+
+An **empty** `requires` means ModuleKit uses your **no-arg** constructor.
+
+### `system`: priority
+
+`system` is a tie-breaker for load order, not a way to jump the queue past real
+dependencies. When several modules are *simultaneously* ready to load — none of
+them depends on another — the ones flagged `system()` are loaded first.
+
+Use it for infrastructure that many modules implicitly expect to be up early (a
+config service, a scheduler) even when the dependency graph does not strictly force
+it. Details and the exact mechanism: [Topological Sort](./topological-sort.mdx#system-priority).
+
+## Getting a descriptor without an instance
+
+There is a subtlety worth flagging here because it shapes how you write modules.
+Discovery needs a module's descriptor *before* the module is constructed — but a
+module that requires injected services **cannot** be constructed early (its
+constructor needs services that don't exist yet).
+
+The solution: declare a **public static `getDescriptor()`**. Discovery prefers it
+and calls it without instantiating anything.
+
+```java
+public static ModuleDescriptor getDescriptor() {         // discovery reads this
+    return ModuleDescriptor.builder("reporting", "Reporting")
+        .requires(DatabaseService.class, AuthService.class)
+        .provides(ReportingService.class)
+        .build();
+}
+
+@Override
+public ModuleDescriptor descriptor() { return getDescriptor(); } // instance method delegates
+```
+
+Why not name the static method `descriptor()` too? Because a static `descriptor()`
+would clash with the abstract instance `descriptor()` inherited from `Module`. The
+distinct name `getDescriptor()` avoids the conflict. The full rules for how
+discovery resolves a descriptor (and what happens if you omit the static method)
+are on the [Discovery](./discovery.mdx#resolving-the-descriptor) page.
+
+## Continue
+
+Next: [Discovery](./discovery.mdx) — how ModuleKit finds your modules on the
+classpath.

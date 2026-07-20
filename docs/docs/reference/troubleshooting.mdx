@@ -1,0 +1,121 @@
+---
+sidebar_position: 1
+title: Troubleshooting & Fault Reference
+---
+
+# Troubleshooting & Fault Reference
+
+Every way a module can fail in ModuleKit produces a specific, logged reason. This
+page is a lookup table: match the symptom or the message to its cause and fix.
+
+## Fault-message reference
+
+| Fault reason (substring) | Stage | Cause | Fix |
+|---|---|---|---|
+| `no descriptor accessor found on ...` | Discovery | The class has neither a static `getDescriptor()` nor a usable no-arg `descriptor()`. | Add a public `static ModuleDescriptor getDescriptor()`. See [Discovery](../concepts/discovery.mdx#resolving-the-descriptor). |
+| `Class not found: ...` (warning, skipped) | Discovery | The service file names a class that isn't on the classpath. | Fix the class name, or ensure the module jar is a dependency. |
+| `... is not a Module subclass — skipped` | Discovery | A service-file line points at a non-`Module` class. | Remove the line or point it at the right class. |
+| `no provider found for required service X` | Graph | A `requires(X)` has no module that `provides(X)`, and `X` isn't an external service. | Add a provider module, fix the type, or declare `X` as an [external service](../concepts/dependency-graph.mdx#external-services). |
+| `duplicate provider for X (already provided by Y)` | Graph | Two modules `provides(X)`. | Keep one provider, or split into two distinct types. First-wins; the later one faults. |
+| `circular dependency detected` | Graph | Modules depend on each other in a loop. | Break the cycle — extract a shared interface, or invert one dependency. See [Topological Sort](../concepts/topological-sort.mdx). |
+| `no constructor found matching required types: [...]` | Injection | No constructor's parameter *set* equals the `requires` set. | Make one constructor whose parameters are exactly those types. |
+| `ambiguous constructor — declare exactly one ...` | Injection | Two constructors match the required type set. | Keep exactly one matching constructor. |
+| `service not found in registry for type X` | Injection | `X` was ordered as available but isn't in the registry at construction. | Ensure the provider actually calls `ctx.register(X.class, impl)`, or that the external service was really put in the registry. |
+| `constructor threw exception: ...` | Injection | Your module's constructor threw. | Fix the constructor; keep heavy work out of it — do it in `onLoad`/`onEnable`. |
+| `failed to instantiate no-arg module: ...` | Injection | A no-`requires` module's no-arg constructor threw or is missing. | Provide a working no-arg constructor. |
+| your own string | Load | The module called `ctx.markFaulty(reason)`. | Address whatever the reason describes. |
+
+## Common symptoms
+
+### "Only one of my modules is discovered"
+
+You built a fat jar without merging service files. All modules share the file name
+`META-INF/services/gg.cubix.modulekit.api.module.Module`, so shading keeps only one.
+Add:
+
+```kotlin
+tasks.shadowJar { mergeServiceFiles { include("META-INF/services/**") } }
+```
+
+See [Installation](../getting-started/installation.mdx#bundling-into-a-single-jar--the-one-mandatory-step).
+
+### "My module faults with 'no descriptor accessor found'"
+
+Its descriptor can't be read without constructing it, and it has no no-arg
+constructor (probably because it takes injected services). Add the static accessor:
+
+```java
+public static ModuleDescriptor getDescriptor() { ... }
+@Override public ModuleDescriptor descriptor() { return getDescriptor(); }
+```
+
+### "A service I provide isn't being injected"
+
+Two usual causes:
+
+1. You declared `.provides(X.class)` but never called `ctx.register(X.class, impl)`
+   in `onLoad`. Declaring is a promise; you must fulfil it. See
+   [Modules & Descriptors](../concepts/modules-and-descriptors.mdx#provides-what-you-offer).
+2. You registered it **outside** `onLoad` (e.g. in `onEnable`). `register` is only
+   active during load and is ignored — with a warning — afterward.
+
+### "`register()` … ignored" warning in the log
+
+You called `ctx.register(...)` after the load phase closed. Move all `register`
+calls into `onLoad` / `onInitialize`.
+
+### "My Paper command does nothing / says the feature is disabled"
+
+The `ModuleAwareCommand` guard blocks a command while its module isn't `ENABLED`.
+Either the module faulted (check the load summary), or it hasn't been enabled yet.
+Enable it (`loadAndEnableModule(id)`), fix the underlying fault, or — only if the
+command must always work — set `bypassModuleGuard = true` on its registration. See
+[the Paper guard](../adapters/paper.mdx#the-guard).
+
+### "Listeners fire twice after a reload" / "listeners leak"
+
+You overrode `onDisable()` without calling `super.onDisable()`, so tracked listeners
+were never unregistered. Always call `super.onDisable()`. Register listeners in
+`onEnable()`, not `onLoad()`. See [Paper → listeners](../adapters/paper.mdx#listeners).
+
+### "Writing to `dataFolder()` throws NoSuchFileException"
+
+`dataFolder()` returns a path but does not create the directory. Create it first:
+
+```java
+Files.createDirectories(ctx.dataFolder());
+```
+
+### "A dependent module faulted even though I didn't touch it"
+
+Fault isolation only protects *unrelated* modules. If module B `requires` a service
+from module A and A faulted, A never registered the service, so B faults with
+`no provider found` / `service not found`. Fix A first; B will recover. Use
+`graph.dependentsOf(id)` thinking to reason about the blast radius —
+[Dependency Graph](../concepts/dependency-graph.mdx#querying-the-graph).
+
+## Reading the startup summary
+
+Both adapters log a summary after the load/initialize phase:
+
+```
+[ModuleKit] Load phase complete: 3 loaded, 1 faulty
+[ModuleKit]   FAULTY economy — no provider found for required service com.example.VaultService
+```
+
+- The first line is the headline count.
+- Each `FAULTY` line names the module and the exact reason (from the table above).
+
+Programmatically, inspect the `LoadResult`:
+
+```java
+LoadResult r = modules.runLoad();
+if (!r.isClean()) r.faulted().forEach(f -> log(f.moduleId(), f.reason()));
+```
+
+## Still stuck?
+
+- Re-read the stage that produced your fault — each Core Concepts page ends with the
+  exact conditions that mark a module faulty.
+- Check the [source on GitHub](https://github.com/iswearimmrtobi/modulekit) — the
+  engine is small and readable, and the fault strings in this table are grep-able.

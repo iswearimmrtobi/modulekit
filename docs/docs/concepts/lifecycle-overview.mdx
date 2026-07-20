@@ -1,0 +1,114 @@
+---
+sidebar_position: 1
+title: The Lifecycle, End to End
+---
+
+import Pipeline from '@site/static/img/diagrams/pipeline.svg';
+import CallLayers from '@site/static/img/diagrams/call-layers.svg';
+
+# The Lifecycle, End to End
+
+This page is the map. It shows the whole pipeline ModuleKit runs, from "some
+classes on the classpath" to "a running application", and links to the deep-dive
+page for each stage. Read it once to see how the pieces fit; then follow the links
+to understand each mechanism in detail.
+
+## The pipeline
+
+<figure className="mk-figure">
+  <Pipeline role="img" />
+</figure>
+
+| Stage | What happens | Deep dive |
+|---|---|---|
+| **discover** | Read every `META-INF/services/...Module` file, load the classes, resolve each `ModuleDescriptor`. | [Discovery](./discovery.mdx) |
+| **build graph** | Map each provided type to its provider; turn every `requires` into a dependency edge; flag missing providers and duplicate providers. | [Dependency Graph](./dependency-graph.mdx) |
+| **topological sort** | Order modules so providers precede consumers; detect cycles; break ties using `system()` priority. | [Topological Sort](./topological-sort.mdx) |
+| **inject** | Find the constructor matching the `requires` set and call it with the services from the registry. | [Dependency Injection](./dependency-injection.mdx) |
+| **onLoad** | Each module registers the services it provides and does one-time setup. | [Lifecycle & States](./lifecycle-and-states.mdx) |
+| **onEnable / onDisable** | Activate / tear down. Disable runs in reverse order. | [Lifecycle & States](./lifecycle-and-states.mdx) |
+
+The thing that orchestrates all of this — storing modules, running actions over
+them in order — is the [Module Manager](./module-manager.mdx).
+
+## Who calls what
+
+A crucial detail: **the core does not drive the lifecycle by itself.** The base
+`ModuleManager` gives you discovery, storage, and two primitives — `runAction`
+(forward order) and `runActionReversed` (reverse order). The *adapter* decides
+what the phases are and calls those primitives.
+
+<figure className="mk-figure">
+  <CallLayers role="img" />
+</figure>
+
+This is why there are two adapters that behave differently (three phases on Paper,
+two on Minestom) while sharing the exact same engine. See
+[Writing Your Own Adapter](../adapters/custom-adapter.mdx).
+
+## The division of labour
+
+```
+modulekit-api      the words everyone agrees on
+                   Module, ModuleDescriptor, LoadContext — interfaces & records only
+
+modulekit-core     the machinery
+                   ServiceLoaderDiscovery   finds modules
+                   DependencyGraph          resolves who-depends-on-whom
+                   TopologicalSort          computes a safe order (Kahn's algorithm)
+                   InjectionResolver        constructs modules with their dependencies
+                   ModuleManager            stores contexts, runs ordered actions
+                   ModuleContext            per-module state holder
+
+modulekit-paper    PaperModule, PaperModuleManager, PaperLoadContext,
+                   CommandRegistration, ModuleAwareCommand
+                   → maps the lifecycle onto Bukkit's JavaPlugin
+
+modulekit-minestom MinestomModule, MinestomModuleManager, MinestomLoadContext
+                   → a standalone manager for a Minestom bootstrap
+```
+
+Every class named above has its own explanation in these Core Concepts pages or in
+the [Adapters](../adapters/paper.mdx) section. Nothing is left as "just call this."
+
+## Fault isolation is a first-class idea
+
+At every stage a module can be marked **faulty** instead of crashing the run:
+
+- **discover**: no readable descriptor.
+- **build graph**: a required service has no provider, or two modules provide the
+  same type.
+- **topological sort**: the module is part of a dependency cycle.
+- **inject**: no matching constructor, an ambiguous one, or one that throws.
+- **onLoad**: the module calls `ctx.markFaulty(reason)`.
+
+A faulty module is set aside and skipped in every later phase. Crucially, it does
+**not** stop unrelated modules from loading. Only modules that *depend on* the
+faulty one are affected (their required service never appears, so they fault too).
+This is covered in [Lifecycle & States](./lifecycle-and-states.mdx#faults).
+
+## What ModuleKit deliberately leaves out
+
+ModuleKit has exactly one responsibility: **discover modules, resolve their
+dependencies, inject them, and manage their lifecycle.** It intentionally does not
+provide:
+
+| Not included | Where it belongs |
+|---|---|
+| Event bus | Inside a module, or the host platform (Bukkit/Minestom already have one). |
+| Config file handling | Each module reads its own config in `onLoad`. |
+| Database / ORM layer | Expose one as a *provided service* from a module. |
+| Messaging / i18n | A module's concern. |
+| Permission checks | Your commands and listeners. |
+
+The one exception is **Paper command registration**, which the Paper adapter owns
+— because guarding a command by module state genuinely needs to live in the
+framework. See [the Paper adapter](../adapters/paper.mdx#commands).
+
+Keeping the surface small is a feature: the behaviour is predictable and easy to
+reason about. You bring the features; ModuleKit assembles them.
+
+## Continue
+
+Start the deep dive at [Modules & Descriptors](./modules-and-descriptors.mdx) — the
+vocabulary everything else is built on.

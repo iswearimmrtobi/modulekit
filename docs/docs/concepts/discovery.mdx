@@ -1,0 +1,158 @@
+---
+sidebar_position: 3
+title: Discovery
+---
+
+# Discovery
+
+Discovery is the first stage of the pipeline: turning "some classes on the
+classpath" into a list of known modules with their descriptors. It is implemented
+by `ServiceLoaderDiscovery` in `modulekit-core`. This page explains exactly how it
+works, including a design choice that differs from the JDK's own `ServiceLoader`.
+
+## What you call
+
+```java
+manager.discover(getClass().getClassLoader());
+```
+
+`discover` asks the given `ClassLoader` for every resource named:
+
+```
+META-INF/services/gg.cubix.modulekit.api.module.Module
+```
+
+Note the file name is the fully-qualified name of the `Module` class. This is the
+same *convention* the JDK service-loader mechanism uses — but ModuleKit reads the
+files itself rather than delegating to `java.util.ServiceLoader`. The reason is
+important and explained [below](#why-not-serviceloader).
+
+## The service file format
+
+Each line is a fully-qualified module class name. The parser
+(`ServiceLoaderDiscovery.stripComment` + `trim`):
+
+- ignores everything from a `#` to end of line (comments),
+- trims surrounding whitespace,
+- skips blank lines.
+
+```text title="META-INF/services/gg.cubix.modulekit.api.module.Module"
+# Feature modules for the app
+com.example.app.database.DatabaseModule
+com.example.app.auth.AuthModule
+
+com.example.app.reporting.ReportingModule   # trailing comments work too
+```
+
+Because the classloader is asked for **all** resources with this name
+(`getResources`, not `getResource`), every jar and every module subproject
+contributes its own file. This is why fat-jar builds must
+[merge service files](../getting-started/installation.mdx#bundling-into-a-single-jar--the-one-mandatory-step)
+— otherwise the collision drops all but one.
+
+## Loading each class
+
+For every class name found, `discoverClass`:
+
+1. Loads the class via the same `ClassLoader`.
+2. **Verifies it is a `Module`** — `Module.class.isAssignableFrom(raw)`. If not, it
+   logs a warning and skips it (a stray non-module line can't break the run).
+3. Resolves its descriptor (next section).
+4. Produces a `DiscoveredModule(descriptor, moduleClass, faultReason)` record.
+
+Failures here are **soft**. A missing class, a non-module class, or an
+unreadable file produces a warning and is skipped or recorded as faulty — discovery
+never throws out of a bad line.
+
+```java title="the discovery result record"
+public record DiscoveredModule(
+    ModuleDescriptor descriptor,
+    Class<? extends Module> moduleClass,
+    String faultReason
+) {
+    public boolean isFaulty() { return faultReason != null; }
+}
+```
+
+## Resolving the descriptor
+
+This is the subtle part. Discovery needs the descriptor **without necessarily
+constructing the module** — because a module with injected dependencies has no
+no-arg constructor to call yet. `resolveDescriptor` tries two strategies, in order:
+
+```
+1. public static ModuleDescriptor getDescriptor()   ← preferred, no instance needed
+2. no-arg constructor + instance descriptor()        ← fallback
+3. neither works → module recorded, marked faulty
+```
+
+### Strategy 1 — static `getDescriptor()`
+
+Discovery reflectively looks for a **public static** method named
+`getDescriptor()` returning a `ModuleDescriptor`, and invokes it with no instance.
+This is the recommended pattern for every module, and the only workable one for
+modules that require injected services:
+
+```java
+public static ModuleDescriptor getDescriptor() {
+    return ModuleDescriptor.builder("reporting", "Reporting")
+        .requires(DatabaseService.class, AuthService.class)
+        .provides(ReportingService.class)
+        .build();
+}
+```
+
+:::note Why the name `getDescriptor` and not `descriptor`?
+`Module` already declares an abstract **instance** method `descriptor()`. Java does
+not allow a static method with the same signature as an inherited instance method,
+so the static accessor needs a different name. `getDescriptor()` is the convention.
+Your instance `descriptor()` then just delegates to it.
+:::
+
+### Strategy 2 — no-arg constructor fallback
+
+If there is no static `getDescriptor()`, discovery falls back to constructing a
+**temporary** instance with a no-arg constructor and calling `descriptor()` on it:
+
+```java
+Module temp = (Module) moduleClass.getDeclaredConstructor().newInstance();
+return temp.descriptor();
+```
+
+This works fine for modules with no dependencies (which have a no-arg constructor
+anyway). It fails — and logs a warning — for modules whose only constructor takes
+injected services.
+
+### Strategy 3 — faulty
+
+If neither strategy yields a descriptor, the module is still recorded so it appears
+in diagnostics, but with a synthetic descriptor and a fault reason like
+`"no descriptor accessor found on ..."`. It will be visible and reported, never
+silently dropped.
+
+## Why not `ServiceLoader`?
+
+The JDK's `ServiceLoader` enforces that every service implementation has a
+**public no-arg constructor**. That rule is fundamentally incompatible with
+constructor injection: a `ReportingModule(DatabaseService, AuthService)` has no
+no-arg constructor by design.
+
+By reading the service files directly, ModuleKit lifts that restriction. Modules
+are free to declare only an injected constructor. The `getDescriptor()` static
+method then provides the metadata that would otherwise have required instantiation.
+
+| `java.util.ServiceLoader` | ModuleKit's `ServiceLoaderDiscovery` |
+|---|---|
+| requires a public no-arg constructor | no such requirement |
+| instantiates the class to inspect it | reads static `getDescriptor()` first |
+| throws on a bad provider | logs and skips, or marks faulty |
+
+## After discovery
+
+`discover` doesn't just collect modules — it immediately builds the dependency
+graph and creates a `ModuleContext` per module, in load order, tagging any that are
+already faulty (bad descriptor, missing provider, cycle). The construction and
+lifecycle happen later, when the adapter calls `runLoad()`.
+
+The next stage reads the descriptors you just resolved:
+[Dependency Graph »](./dependency-graph.mdx)

@@ -1,0 +1,153 @@
+---
+sidebar_position: 1
+title: Installation
+---
+
+# Installation
+
+ModuleKit is published under the group id `gg.cubix` at version `1.1.0`. It
+targets **Java 25**. This page covers adding it to a Gradle build for the three
+common setups: a plain Java app, a feature module, and a shaded Minecraft plugin.
+
+:::info Artifacts
+| Artifact | When you need it |
+|---|---|
+| `gg.cubix:modulekit-api:1.1.0` | Always. Your module classes compile against this. |
+| `gg.cubix:modulekit-core:1.1.0` | In the application/host that runs discovery and the lifecycle. |
+| `gg.cubix:modulekit-paper:1.1.0` | Paper plugins. Pulls in `api` + `core` transitively. |
+| `gg.cubix:modulekit-minestom:1.1.0` | Minestom servers. Pulls in `api` transitively. |
+:::
+
+## A feature module
+
+A **feature module** is a self-contained unit (`reporting`, `economy`, `chat`, …).
+It only needs the API to compile. If it references core types (like
+`InjectionResolver`) keep them `compileOnly`, because the host already brings core.
+
+```kotlin title="reporting/build.gradle.kts"
+plugins { `java-library` }
+
+dependencies {
+    api("gg.cubix:modulekit-api:1.1.0")
+
+    // Only if this module touches core types directly; usually not needed:
+    compileOnly("gg.cubix:modulekit-core:1.1.0")
+
+    // Type references to services provided by OTHER modules:
+    compileOnly(project(":database")) // for the DatabaseService interface
+    compileOnly(project(":auth"))     // for the AuthService interface
+}
+```
+
+:::tip Why `compileOnly` for other modules?
+A module needs the *interface* of a service it consumes at compile time, but it
+must **not** bundle another module's implementation. ModuleKit supplies the real
+instance at runtime through injection. `compileOnly` gives you the type without
+the coupling.
+:::
+
+## The host application (plain Java)
+
+The host is the program that owns the `main()` method (or the plugin entry
+point). It brings `core` — which contains the engine — plus every feature module
+it wants to run.
+
+```kotlin title="app/build.gradle.kts"
+plugins {
+    java
+    id("com.gradleup.shadow") version "9.4.1" // if you ship a single fat jar
+}
+
+dependencies {
+    implementation("gg.cubix:modulekit-api:1.1.0")
+    implementation("gg.cubix:modulekit-core:1.1.0")
+
+    // Every feature module you want available at runtime:
+    implementation(project(":database"))
+    implementation(project(":auth"))
+    implementation(project(":reporting"))
+}
+```
+
+## Bundling into a single jar — the one mandatory step
+
+Modules are discovered through **service files** on the classpath (see
+[Discovery](../concepts/discovery.mdx)). Every module contributes a file at the
+same path:
+
+```
+META-INF/services/gg.cubix.modulekit.api.module.Module
+```
+
+When you shade many modules into one jar, those files **collide** — they all have
+the same name. Without merging, only *one* survives and every other module
+becomes invisible. You must tell the shadow plugin to merge them:
+
+```kotlin title="app/build.gradle.kts"
+tasks.shadowJar {
+    mergeServiceFiles {
+        include("META-INF/services/**")
+    }
+}
+```
+
+:::danger This is the #1 setup mistake
+If modules "disappear" — discovery finds one and silently ignores the rest — you
+almost certainly forgot `mergeServiceFiles`. It is required for any fat jar that
+bundles more than one module.
+:::
+
+## Paper plugin
+
+Paper plugins use the `modulekit-paper` adapter. Paper itself is `compileOnly`
+(the server provides it at runtime).
+
+```kotlin title="build.gradle.kts"
+plugins {
+    java
+    id("com.gradleup.shadow") version "9.4.1"
+}
+
+dependencies {
+    implementation("gg.cubix:modulekit-paper:1.1.0") // brings api + core
+    compileOnly("io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT")
+
+    implementation(project(":gamemode"))
+    implementation(project(":economy"))
+}
+
+tasks.shadowJar {
+    mergeServiceFiles { include("META-INF/services/**") }
+}
+```
+
+Continue with the [Paper adapter guide](../adapters/paper.mdx).
+
+## Minestom server
+
+Minestom servers use `modulekit-minestom` and are typically launched from your
+own `main()`.
+
+```kotlin title="build.gradle.kts"
+dependencies {
+    implementation("gg.cubix:modulekit-minestom:1.1.0")
+    implementation("net.minestom:minestom:2026.06.05-26.1.2")
+
+    implementation(project(":world"))
+    implementation(project(":lobby"))
+}
+```
+
+Continue with the [Minestom adapter guide](../adapters/minestom.mdx).
+
+## Verify your toolchain
+
+ModuleKit is compiled for **Java 25**. Set your toolchain accordingly:
+
+```kotlin title="build.gradle.kts"
+java {
+    toolchain.languageVersion.set(JavaLanguageVersion.of(25))
+}
+```
+
+Next: [build your first module »](./your-first-module.mdx)

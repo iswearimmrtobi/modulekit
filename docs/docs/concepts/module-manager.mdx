@@ -1,0 +1,200 @@
+---
+sidebar_position: 8
+title: The Module Manager
+---
+
+# The Module Manager
+
+`ModuleManager` is the object that ties everything together: it runs discovery,
+stores a `ModuleContext` for each module, and provides the primitives an adapter
+uses to drive the lifecycle. Understanding it is what lets you write your own
+adapter — or simply understand what the Paper and Minestom ones are doing.
+
+```java
+public class ModuleManager<M extends Module<S>, S extends Enum<S>>
+```
+
+Two type parameters:
+
+- **`M`** — the concrete module base type (`PaperModule`, `MinestomModule`, or your
+  own).
+- **`S`** — the state enum for that platform.
+
+The adapters fix these: `PaperModuleManager extends ModuleManager<PaperModule,
+PaperModuleState>`.
+
+## What the base manager does — and does not — do
+
+:::info Key design point
+The base `ModuleManager` provides **discovery, storage, lookups, and two ordered
+iteration primitives**. It does **not** drive a lifecycle on its own — it has no
+`runLoad`. The adapter (or your subclass) implements the phases using those
+primitives. This separation is why one engine supports several lifecycle shapes.
+:::
+
+## Construction
+
+```java
+public ModuleManager(S initialState, S faultyState)
+```
+
+You give it the enum value a module starts in and the value that means "faulty".
+`PaperModuleManager` passes `(DISABLED, FAULTY)`; `MinestomModuleManager` the same
+for its enum. The manager uses `faultyState` when tagging modules that failed
+discovery or graph resolution.
+
+## Discovery
+
+```java
+public void discover(ClassLoader loader)
+```
+
+`discover`:
+
+1. Runs [`ServiceLoaderDiscovery`](./discovery.mdx) to get `DiscoveredModule`s.
+2. Builds the [`DependencyGraph`](./dependency-graph.mdx) from their descriptors,
+   passing `externalServices()`.
+3. Iterates the graph's `loadOrder()` and creates a `ModuleContext` per module —
+   **in load order**, so the stored list is already correctly ordered.
+4. Pre-tags contexts that are already known-bad: a discovery fault (bad descriptor)
+   or a graph fault (missing provider, cycle) sets the context to `faultyState`
+   immediately, with a warning logged.
+
+After `discover`, the manager holds one `ModuleContext` per module, in the order
+they should load, with faults from the static analysis already marked. No module
+has been *constructed* yet — that happens in the load phase.
+
+## The iteration primitives
+
+These two methods are the engine the adapters build phases from:
+
+```java
+public void runAction(Consumer<ModuleContext<M, S>> action)          // load order
+public void runActionReversed(Consumer<ModuleContext<M, S>> action)  // reverse order
+```
+
+- `runAction` applies your action to every context **in load order** — used for
+  load and enable.
+- `runActionReversed` applies it in **reverse** — used for disable, so teardown
+  happens opposite to setup.
+
+An adapter's `runLoad` is essentially:
+
+```java
+runAction(ctx -> {
+    // inject → onLoad → set state, recording faults as it goes
+});
+```
+
+Because the contexts are already in dependency order, the action doesn't need to
+think about ordering at all — it just processes each context in turn.
+
+## `ModuleContext`
+
+Each module is wrapped in a `ModuleContext<M, S>` — the manager's per-module record.
+It holds everything the manager knows about one module:
+
+```java
+public class ModuleContext<M extends Module<S>, S extends Enum<S>> {
+    M module();                       // the instance (null until constructed)
+    Class<? extends M> moduleClass(); // the class (known from discovery)
+    ModuleDescriptor descriptor();    // its descriptor
+    S state();                        // current state
+    void setModule(M module);         // set the constructed instance
+    void setState(S state);           // update state (mirrors onto the module)
+}
+```
+
+Two subtleties:
+
+- `module()` is `null` between discovery and construction. The load phase checks
+  `if (ctx.module() == null)` before injecting — which also lets you pre-seed a
+  module via `addModule` and skip injection for it.
+- `setState` updates the context **and** the module (`module.setState`) so
+  `module.state()` and `ctx.state()` never diverge.
+
+## Registering a module manually
+
+Besides classpath discovery, you can add an already-constructed module:
+
+```java
+public void addModule(M module)
+```
+
+This wraps the instance in a context with `initialState` and stores it. Because the
+instance already exists, the load phase skips injection for it. Useful for tests, or
+for a module you want to construct by hand with special arguments.
+
+## Runtime lookups
+
+```java
+Optional<M>            getModule(String id)      // by descriptor id
+<T extends M> Optional<T> getModule(Class<T> type) // by class
+List<ModuleContext<M,S>> contexts()               // all contexts (unmodifiable)
+```
+
+Examples:
+
+```java
+modules.getModule("reporting");                 // Optional<M>
+modules.getModule(ReportingModule.class);       // Optional<ReportingModule>
+
+for (var ctx : modules.contexts()) {
+    System.out.println(ctx.descriptor().id() + " → " + ctx.state());
+}
+```
+
+`getModule` only returns present (constructed, non-null) modules. A faulty module
+that never got constructed won't be returned by the id/class lookups, though its
+context is still visible via `contexts()`.
+
+## External services
+
+```java
+protected Set<Class<?>> externalServices() { return Set.of(); }
+```
+
+Override this to declare service types that are **pre-registered outside any
+module** — so the dependency graph won't fault a module that `requires()` them.
+This is one half of the external-services story; the other half is actually putting
+the instance in the injection registry. The Paper adapter does both:
+
+```java
+// PaperModuleManager
+contextFactory.registry().put(JavaPlugin.class, plugin); // put it in the registry
+@Override protected Set<Class<?>> externalServices() {
+    return contextFactory.registry().keySet();           // tell the graph about it
+}
+```
+
+It also exposes `registerService(Class, Object)` so the host can add more external
+services (a shared database handle, a config object) before `runLoad`. See
+[Dependency Graph → External services](./dependency-graph.mdx#external-services).
+
+## Putting it together
+
+Here is the base manager's role in the whole flow, annotated:
+
+```
+discover(loader)
+   ├─ ServiceLoaderDiscovery.discover(...)     find modules
+   ├─ DependencyGraph.build(..., externalServices())   order + faults
+   └─ create ModuleContext per module, in load order, pre-tag faults
+
+runLoad()   (adapter)   uses runAction:
+   for each ctx in order:
+       if ctx.module()==null: InjectionResolver.resolve(...)   construct
+       ctx.module().onLoad(loadContext)                        register services
+       ctx.setState(LOADED)  or record fault
+
+runEnable() (adapter)   uses runAction:        ctx.module().onEnable()
+runDisable()(adapter)   uses runActionReversed: ctx.module().onDisable()
+```
+
+## Continue
+
+You now understand the engine. See how a real adapter uses it:
+
+- [Paper adapter](../adapters/paper.mdx)
+- [Minestom adapter](../adapters/minestom.mdx)
+- [Writing your own adapter](../adapters/custom-adapter.mdx)

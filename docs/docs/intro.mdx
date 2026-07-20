@@ -1,6 +1,110 @@
 ---
 sidebar_position: 1
+slug: /
+title: What is ModuleKit?
 ---
 
-# ModuleKit Intro
-Test
+import Architecture from '@site/static/img/diagrams/architecture.svg';
+import Pipeline from '@site/static/img/diagrams/pipeline.svg';
+
+# What is ModuleKit?
+
+ModuleKit is a **lightweight Java module framework**. It lets you split one
+application into many small, self-contained **modules**, and then it does the
+tedious part for you: it finds those modules, works out the order they have to
+start in, hands each one the services it needs, and drives every module through
+a managed lifecycle.
+
+It has no runtime dependencies in its core, works in any plain Java program, and
+ships with two ready-made adapters for the Minecraft server platforms **Paper**
+and **Minestom**.
+
+:::tip New here? Read in this order
+1. This page — the mental model.
+2. [Installation](./getting-started/installation.mdx) and
+   [Your First Module](./getting-started/your-first-module.mdx) — get something running.
+3. The [Core Concepts](./concepts/lifecycle-overview.mdx) section — understand *why* it
+   works, so you can use it well.
+:::
+
+## The core idea in one sentence
+
+> A module declares the service **types** it *provides* and the service **types**
+> it *requires* — and ModuleKit wires the two together.
+
+A module never names another module. It never reaches into a global registry to
+"find" a collaborator. It simply lists the interfaces it needs in its
+constructor, and by the time ModuleKit constructs it, those interfaces are
+already available. This is **constructor injection**, and it is what keeps
+modules decoupled and independently testable.
+
+```java
+// This module needs a DatabaseService and an AuthService.
+// It does NOT know or care which module provides them.
+public ReportingModule(DatabaseService db, AuthService auth) {
+    this.db = db;
+    this.auth = auth;
+}
+```
+
+## What you get
+
+| Feature | What it means for you |
+|---|---|
+| **Automatic discovery** | Drop a module on the classpath, list it in one file, and it is found — no central registry to edit. |
+| **Dependency resolution** | Declare what you need by type; ModuleKit finds the provider and injects it. |
+| **Safe load ordering** | Providers always start before the modules that consume them, computed with a topological sort. |
+| **Fault isolation** | A broken module is quarantined and skipped. The rest of the application still starts. |
+| **Managed lifecycle** | Each module runs through clear phases (`load → enable → disable`) with hooks you override. |
+| **Platform adapters** | Paper and Minestom integrations that map the lifecycle onto the host and add platform niceties. |
+
+## The three parts of the project
+
+ModuleKit is one library plus two adapters. Everything below `api` and `core` is
+plain Java; the adapters are thin layers on top.
+
+<figure className="mk-figure mk-figure--narrow">
+  <Architecture role="img" />
+  <figcaption>api &amp; core are platform-agnostic; each adapter is a thin layer on the core.</figcaption>
+</figure>
+
+| Subproject | Role | Depends on |
+|---|---|---|
+| **`modulekit-api`** | The pure contract you write modules against: `Module`, `ModuleDescriptor`, `LoadContext`. | Nothing. |
+| **`modulekit-core`** | The engine: discovery, the dependency graph, topological sort, constructor injection. | `api` |
+| **`modulekit-paper`** | Adapter for [Paper](https://papermc.io/) plugins. Maps the lifecycle onto `JavaPlugin`, tracks Bukkit listeners, registers commands. | `api`, `core`, Paper API |
+| **`modulekit-minestom`** | Adapter for [Minestom](https://minestom.net/). A standalone manager you drive from your own `main()`. | `api`, `core`, Minestom |
+
+Read more in [The three parts, in depth](./concepts/lifecycle-overview.mdx#the-division-of-labour).
+
+## The lifecycle at a glance
+
+When your application starts, ModuleKit runs a pipeline. Each stage is documented
+in its own page in [Core Concepts](./concepts/lifecycle-overview.mdx) — this is the
+30-second version:
+
+<figure className="mk-figure">
+  <Pipeline role="img" />
+</figure>
+
+## When should you use it?
+
+ModuleKit is a good fit when:
+
+- Your application has grown past the point where one file tree comfortably owns
+  everything, and you want **feature-per-module** separation.
+- Several features need to **share services** (a database, an auth layer, a config
+  provider) without hard-wiring them together.
+- You cannot afford one broken feature to **take down the whole process** — you
+  want fault isolation.
+- You are building a **Paper or Minestom** server and want each feature as an
+  independently toggleable module.
+
+It is deliberately *not* an everything-framework. See
+[Scope & limits](./concepts/lifecycle-overview.mdx#what-modulekit-deliberately-leaves-out)
+for what it leaves to you.
+
+## Next step
+
+Head to [Installation](./getting-started/installation.mdx) to add ModuleKit to your
+build, then build [Your First Module](./getting-started/your-first-module.mdx).

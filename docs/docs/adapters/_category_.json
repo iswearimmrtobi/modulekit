@@ -1,0 +1,9 @@
+{
+  "label": "Adapters",
+  "position": 4,
+  "link": {
+    "type": "generated-index",
+    "title": "Platform Adapters",
+    "description": "Using ModuleKit on a concrete runtime: the Paper and Minestom adapters, and how to write your own."
+  }
+}

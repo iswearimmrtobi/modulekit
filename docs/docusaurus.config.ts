@@ -6,7 +6,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
   title: 'ModuleKit',
-  tagline: 'ModuleKit documentation',
+  tagline: 'A lightweight Java module framework — wire features together by constructor injection, with a managed lifecycle.',
   favicon: 'img/favicon.ico',
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
@@ -26,6 +26,7 @@ const config: Config = {
   projectName: 'modulekit', // Usually your repo name.
 
   onBrokenLinks: 'throw',
+  onBrokenAnchors: 'throw',
 
   // Even if you don't use internationalization, you can use this field to set
   // useful metadata like html lang. For example, if your site is Chinese, you
@@ -103,7 +104,7 @@ const config: Config = {
           items: [
             {
               label: 'Docs',
-              to: '/docs/intro',
+              to: '/docs/',
             },
           ],
         },
@@ -130,6 +131,10 @@ const config: Config = {
     prism: {
       theme: prismThemes.github,
       darkTheme: prismThemes.dracula,
+      // The default Prism bundle does not include these — without them, Java and
+      // Kotlin code blocks render almost colourless. Registering them turns on
+      // full syntax highlighting.
+      additionalLanguages: ['java', 'kotlin', 'groovy', 'bash', 'json'],
     },
   } satisfies Preset.ThemeConfig,
 };

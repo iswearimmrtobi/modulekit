@@ -1,0 +1,217 @@
+---
+sidebar_position: 2
+title: Your First Module
+---
+
+# Your First Module
+
+This page walks through a complete, working module from nothing to running. We
+build a small **reporting** feature that depends on two other services, provides
+one of its own, and runs on the Paper adapter. Every line is explained.
+
+If you have not added ModuleKit to your build yet, do
+[Installation](./installation.mdx) first.
+
+## The shape of a module
+
+Every module is a class that:
+
+1. **extends `Module<S>`** (or an adapter base class like `PaperModule`), where
+   `S` is your state enum,
+2. **has a descriptor** declaring its id, what it provides, and what it requires,
+   and
+3. **implements lifecycle hooks** (`onLoad`, `onEnable`, `onDisable`).
+
+Then you list its class name in one service file so discovery can find it.
+
+## Step 1 — Write the class
+
+```java title="ReportingModule.java"
+package com.example.app.reporting;
+
+import gg.cubix.modulekit.api.lifecycle.LoadContext;
+import gg.cubix.modulekit.api.module.Module;
+import gg.cubix.modulekit.api.module.ModuleDescriptor;
+
+public final class ReportingModule extends Module<AppModuleState> {
+
+    private final DatabaseService db;
+    private final AuthService auth;
+
+    // 1. ModuleKit calls THIS constructor, passing in the services it injected.
+    //    The parameter types must match the descriptor's requires() list.
+    public ReportingModule(DatabaseService db, AuthService auth) {
+        this.db = db;
+        this.auth = auth;
+    }
+
+    // 2. A static accessor lets discovery read the descriptor WITHOUT
+    //    constructing the module (which it cannot, since the constructor
+    //    needs injected services). See the Discovery page for why.
+    public static ModuleDescriptor getDescriptor() {
+        return ModuleDescriptor.builder("reporting", "Reporting")
+            .requires(DatabaseService.class, AuthService.class) // what we need
+            .provides(ReportingService.class)                   // what we offer
+            .build();
+    }
+
+    @Override
+    public ModuleDescriptor descriptor() {
+        return getDescriptor();
+    }
+
+    // 3a. Load phase: register the service we provide. Do this here, and ONLY
+    //     here — register() is only valid during onLoad.
+    @Override
+    public void onLoad(LoadContext ctx) {
+        ctx.register(ReportingService.class, new ReportingServiceImpl(db, auth));
+    }
+
+    // 3b. Enable phase: start doing work — background tasks, listeners, etc.
+    @Override
+    public void onEnable() {
+        // e.g. schedule a nightly report job
+    }
+
+    // 3c. Disable phase: undo what enable did. Runs in reverse load order.
+    @Override
+    public void onDisable() {
+        // e.g. cancel the job, close resources
+    }
+}
+```
+
+:::note Where does `AppModuleState` come from?
+`Module<S>` is generic over a **state enum you define**. ModuleKit does not ship a
+fixed set of states in its core — you bring your own. On the Paper and Minestom
+adapters this is done for you (`PaperModuleState`, `MinestomModuleState`), so on
+those platforms you extend `PaperModule` / `MinestomModule` instead and never
+touch the generic directly. See
+[Lifecycle & States](../concepts/lifecycle-and-states.mdx).
+:::
+
+## Step 2 — Understand the two collaborators
+
+`ReportingModule` requires `DatabaseService` and `AuthService`. Those are
+**interfaces** provided by other modules. A provider looks like this:
+
+```java title="DatabaseModule.java"
+public final class DatabaseModule extends Module<AppModuleState> {
+
+    public static ModuleDescriptor getDescriptor() {
+        return ModuleDescriptor.builder("database", "Database")
+            .provides(DatabaseService.class) // no requires() — a leaf provider
+            .build();
+    }
+
+    @Override public ModuleDescriptor descriptor() { return getDescriptor(); }
+
+    @Override
+    public void onLoad(LoadContext ctx) {
+        // dataFolder() gives this module its own directory (see LoadContext docs)
+        ctx.register(DatabaseService.class, new SqliteDatabaseService(ctx.dataFolder()));
+    }
+
+    @Override public void onEnable()  {}
+    @Override public void onDisable() {}
+}
+```
+
+Because `DatabaseModule` **provides** `DatabaseService` and `ReportingModule`
+**requires** it, ModuleKit will:
+
+- create an **edge** in the dependency graph (`reporting` depends on `database`),
+- **order** `database` before `reporting`,
+- have `database` register its service during *its* `onLoad`, and
+- **inject** that service into `reporting`'s constructor.
+
+You never wrote a line of wiring. That is the whole point.
+
+## Step 3 — Register the module for discovery
+
+Create the service file. Each module you write adds one line naming its class:
+
+```text title="src/main/resources/META-INF/services/gg.cubix.modulekit.api.module.Module"
+# One fully-qualified module class per line.
+# Blank lines and lines after a '#' are ignored.
+com.example.app.reporting.ReportingModule
+com.example.app.database.DatabaseModule
+com.example.app.auth.AuthModule
+```
+
+If each module lives in its own Gradle subproject, each subproject has its **own**
+copy of this file listing just its class — and the shadow plugin merges them at
+build time (see [Installation](./installation.mdx#bundling-into-a-single-jar--the-one-mandatory-step)).
+
+## Step 4 — Run it (Paper example)
+
+The host wires the manager to the platform lifecycle. On Paper that is three
+method calls:
+
+```java title="MyPlugin.java"
+public final class MyPlugin extends JavaPlugin {
+
+    private PaperModuleManager modules;
+
+    @Override
+    public void onLoad() {
+        modules = new PaperModuleManager(this);
+        modules.discover(getClass().getClassLoader()); // find modules
+        var result = modules.runLoad();                // construct + onLoad
+        if (!result.isClean()) {
+            result.faulted().forEach(f ->
+                getLogger().severe("Module '" + f.moduleId() + "' failed: " + f.reason()));
+        }
+    }
+
+    @Override public void onEnable()  { modules.runEnable(); }
+    @Override public void onDisable() { modules.runDisable(); }
+}
+```
+
+That is a full, working setup. (The reporting example uses the raw
+`Module<AppModuleState>` form to show the underlying contract; on Paper you would
+normally extend `PaperModule`, which is a bit less boilerplate — see the
+[Paper adapter](../adapters/paper.mdx).)
+
+## Step 5 — Read the result
+
+`runLoad()` returns a `LoadResult`. Treat faults as **data**, not exceptions — a
+faulty module never throws out of the manager; it is recorded and skipped.
+
+```java
+LoadResult result = modules.runLoad();
+
+System.out.println("Loaded: " + result.loaded());       // ["database","auth","reporting"]
+System.out.println("Clean?  " + result.isClean());       // true if nothing faulted
+
+for (LoadResult.FaultEntry fault : result.faulted()) {
+    System.out.println(fault.moduleId() + " -> " + fault.reason());
+}
+```
+
+## What just happened, in order
+
+```
+discover()          reads the service file, loads the 3 classes,
+                    reads each descriptor via getDescriptor()
+
+runLoad():
+  build graph       database & auth provide services reporting requires
+  topological sort  order = [auth, database, reporting]  (providers first)
+  for each module in order:
+      inject        construct it, passing required services into the ctor
+      onLoad        module registers the service(s) it provides
+
+runEnable()         calls onEnable() on each loaded module, in order
+runDisable()        calls onDisable() on each, in REVERSE order
+```
+
+## Where to go next
+
+Now that you have something running, learn *why* it works — this is what lets you
+use ModuleKit well:
+
+- [The lifecycle, end to end](../concepts/lifecycle-overview.mdx)
+- [Modules & Descriptors](../concepts/modules-and-descriptors.mdx)
+- [Dependency Injection](../concepts/dependency-injection.mdx)

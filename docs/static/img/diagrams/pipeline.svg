@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 824 120" font-family="var(--ifm-font-family-monospace)" role="img" aria-label="The ModuleKit load pipeline: discover, build graph, topological sort, inject, onLoad, onEnable.">
+  <defs>
+    <marker id="ar-pipe" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--mk-line)"/>
+    </marker>
+  </defs>
+
+  <!-- connectors -->
+  <g stroke="var(--mk-line)" stroke-width="2" marker-end="url(#ar-pipe)">
+    <line x1="128" y1="40" x2="147" y2="40"/>
+    <line x1="264" y1="40" x2="283" y2="40"/>
+    <line x1="400" y1="40" x2="419" y2="40"/>
+    <line x1="536" y1="40" x2="555" y2="40"/>
+    <line x1="672" y1="40" x2="691" y2="40"/>
+  </g>
+
+  <!-- boxes -->
+  <g>
+    <rect x="12"  y="16" width="116" height="48" rx="8" fill="var(--mk-box-fill-2)" stroke="var(--mk-box-stroke)" stroke-width="1.5"/>
+    <rect x="148" y="16" width="116" height="48" rx="8" fill="var(--mk-box-fill-2)" stroke="var(--mk-box-stroke)" stroke-width="1.5"/>
+    <rect x="284" y="16" width="116" height="48" rx="8" fill="var(--mk-box-fill-2)" stroke="var(--mk-box-stroke)" stroke-width="1.5"/>
+    <rect x="420" y="16" width="116" height="48" rx="8" fill="var(--mk-box-fill-2)" stroke="var(--mk-box-stroke)" stroke-width="1.5"/>
+    <rect x="556" y="16" width="116" height="48" rx="8" fill="var(--mk-box-fill-2)" stroke="var(--mk-box-stroke)" stroke-width="1.5"/>
+    <rect x="692" y="16" width="116" height="48" rx="8" fill="var(--mk-enabled-bg)" stroke="var(--mk-enabled)" stroke-width="1.5"/>
+  </g>
+
+  <!-- labels -->
+  <g font-size="14" font-weight="600" text-anchor="middle" fill="var(--mk-text)">
+    <text x="70"  y="45">discover</text>
+    <text x="206" y="45">build graph</text>
+    <text x="342" y="39">topological</text>
+    <text x="342" y="55">sort</text>
+    <text x="478" y="45">inject</text>
+    <text x="614" y="45">onLoad</text>
+    <text x="750" y="45" fill="var(--mk-enabled)">onEnable</text>
+  </g>
+
+  <!-- captions -->
+  <g font-size="11" text-anchor="middle" fill="var(--mk-muted)">
+    <text x="70"  y="86">find modules</text>
+    <text x="206" y="86">provides&#8594;requires</text>
+    <text x="342" y="86">order + cycles</text>
+    <text x="478" y="86">construct</text>
+    <text x="614" y="86">register services</text>
+    <text x="750" y="86">go live</text>
+  </g>
+</svg>

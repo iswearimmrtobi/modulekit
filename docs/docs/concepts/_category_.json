@@ -1,0 +1,9 @@
+{
+  "label": "Core Concepts",
+  "position": 3,
+  "link": {
+    "type": "generated-index",
+    "title": "Core Concepts",
+    "description": "How ModuleKit actually works, one mechanism at a time. Read these to understand the implementation well enough to use it confidently."
+  }
+}

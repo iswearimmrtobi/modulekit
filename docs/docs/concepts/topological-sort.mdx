@@ -1,0 +1,136 @@
+---
+sidebar_position: 5
+title: Topological Sort
+---
+
+import Cycle from '@site/static/img/diagrams/cycle.svg';
+
+# Topological Sort
+
+The dependency graph tells ModuleKit *which* modules depend on which. The
+topological sort turns that into an actual **order**: a sequence where every
+provider comes before the modules that consume it. It also detects **cycles**. This
+is `TopologicalSort` in `modulekit-core`, and it implements **Kahn's algorithm**.
+
+## The problem it solves
+
+Given edges "reporting depends on database" and "reporting depends on auth", we
+need an order like `[auth, database, reporting]` — never `[reporting, database, …]`,
+because `reporting` must not load before its services exist. When there are many
+modules with interlocking dependencies, computing such an order by hand is
+error-prone. A topological sort does it correctly and detects the one case where no
+valid order exists: a cycle.
+
+## Kahn's algorithm, as implemented
+
+The method signature:
+
+```java
+TopologicalResult sort(Map<String, Set<String>> dependencies, Set<String> prioritized)
+```
+
+- `dependencies` — `node → set of nodes it depends on`.
+- `prioritized` — nodes to prefer when several are ready at once (the `system()`
+  modules).
+- returns `TopologicalResult(List<String> order, Set<String> cyclic)`.
+
+### Step 1 — Compute in-degrees
+
+The **in-degree** of a node is how many dependencies it still has unmet. The
+algorithm counts, for each node, the number of things it depends on, and builds a
+reverse map `dep → dependents` so it can walk forward later.
+
+```
+auth        in-degree 0   (depends on nothing)
+database    in-degree 0
+reporting   in-degree 2   (depends on auth and database)
+```
+
+### Step 2 — Seed the ready queue
+
+Every node with in-degree `0` is "ready" — it has no unmet dependencies. These go
+into a priority queue:
+
+```java
+Queue<String> ready = new PriorityQueue<>(Comparator
+    .comparingInt((String n) -> prioritized.contains(n) ? 0 : 1) // system first
+    .thenComparing(Comparator.naturalOrder()));                  // then alphabetical
+```
+
+Two levels of ordering among ready nodes:
+
+1. **`system()` modules first** (`prioritized` → sort key `0` vs `1`).
+2. **Alphabetical** by id as a final tie-break, purely for **determinism** — the
+   same input always yields the same order, which makes builds and logs
+   reproducible.
+
+### Step 3 — Drain the queue
+
+Repeatedly take the highest-priority ready node, append it to the output order, and
+for each of its dependents subtract one from their in-degree. When a dependent's
+in-degree hits `0`, it becomes ready and enters the queue.
+
+```
+ready: [auth, database]        order: []
+ poll auth      → database still needs itself? no: reporting-=? reporting stays 2→ (auth done)
+ ...            → when both auth and database are processed, reporting hits 0
+order: [auth, database, reporting]
+```
+
+(The exact interleaving of `auth`/`database` is decided by priority then
+alphabetical order, since they are independent.)
+
+### Step 4 — Detect cycles
+
+If, after draining, some nodes were **never** added to the order, they still have a
+positive in-degree — which can only happen if they depend on each other in a loop.
+Those nodes are the **cyclic** set:
+
+```java
+Set<String> cyclic = new LinkedHashSet<>();
+for (String node : inDegree.keySet())
+    if (!order.contains(node)) cyclic.add(node);
+order.addAll(cyclic); // appended at the very end
+```
+
+The cyclic nodes are appended to the end of `order` (so `loadOrder()` still lists
+*every* module) and returned separately in `cyclic`. The dependency graph then
+marks each cyclic module faulty with `"circular dependency detected"`, and the
+manager skips them.
+
+<figure className="mk-figure mk-figure--narrow">
+  <Cycle role="img" />
+</figure>
+
+## `system()` priority
+
+`system()` does **not** let a module skip ahead of something it depends on — the
+in-degree mechanism strictly enforces real dependencies. It only decides order
+**among modules that are ready at the same moment**.
+
+Concretely: suppose `config`, `metrics`, and `chat` have no dependencies between
+them, so all three are ready immediately. Without priority they'd load
+alphabetically: `chat, config, metrics`. Flag `config` with `.system()` and it
+jumps to the front of that ready set:
+
+```
+without system():   [chat, config, metrics]
+config.system():    [config, chat, metrics]   ← config first among the ready group
+```
+
+Use it for infrastructure other modules *expect* to be up early even though they
+don't formally `requires()` it — a logging setup, a scheduler, a feature-flag
+service. If a module genuinely needs another, express that with
+`requires()`/`provides()` instead; that is stronger and self-documenting.
+
+## Determinism guarantee
+
+Because the ready queue always breaks ties by (`system` flag, then id), the load
+order is a **pure function** of the descriptors. Same modules in, same order out —
+regardless of classpath scan order or hash-map iteration quirks. That predictability
+is why startup logs and fault reports are stable across runs.
+
+## Continue
+
+Next: [Dependency Injection](./dependency-injection.mdx) — how each module is
+constructed with the services it requires, now that the order is known.

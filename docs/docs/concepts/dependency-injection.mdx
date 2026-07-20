@@ -1,0 +1,173 @@
+---
+sidebar_position: 6
+title: Dependency Injection
+---
+
+# Dependency Injection
+
+This is where a module actually gets **constructed**. By the time it is a module's
+turn (the order guarantees its providers ran first), the services it requires are
+already in a registry. `InjectionResolver` in `modulekit-core` finds the right
+constructor and calls it with those services. This page explains the matching rules
+precisely — they are strict, and understanding them prevents the most common
+"why won't my module load" problems.
+
+## The registry
+
+Injection reads from a `Map<Class<?>, Object>` — the **service registry**. It maps a
+service type to the concrete instance currently registered for it. Entries appear in
+two ways:
+
+1. A module calls `ctx.register(Type.class, impl)` during its `onLoad` — adding what
+   it *provides*.
+2. The adapter pre-registers **external services** (e.g. the `JavaPlugin`) before
+   any module loads.
+
+Because providers load before consumers, a consumer's required services are always
+present in the registry by the time it is constructed.
+
+## The entry point
+
+```java
+InjectionResolver.InjectionResult resolve(
+    ModuleDescriptor descriptor,
+    Class<? extends Module> moduleClass,
+    Map<Class<?>, Object> serviceRegistry
+)
+```
+
+It returns an `InjectionResult` that is either an `instance` or a `faultReason` —
+never a thrown exception for an expected failure:
+
+```java
+public record InjectionResult(Module instance, String faultReason) {
+    public boolean isFaulty() { return faultReason != null; }
+}
+```
+
+## The matching rules
+
+### Rule 1 — Empty `requires` → no-arg constructor
+
+If the descriptor requires nothing, ModuleKit calls the **no-arg** constructor:
+
+```java
+if (required.isEmpty()) {
+    Module instance = moduleClass.getDeclaredConstructor().newInstance();
+    ...
+}
+```
+
+A leaf provider like `DatabaseModule` (provides a service, requires none) takes this
+path.
+
+### Rule 2 — Match a constructor by its type **set**
+
+If there are required types, the resolver scans **all** declared constructors and
+looks for exactly one whose parameter types, taken as a `Set`, equal the required
+types as a `Set`:
+
+```java
+Set<Class<?>> requiredSet = new LinkedHashSet<>(required);
+for (Constructor<?> ctor : moduleClass.getDeclaredConstructors()) {
+    Set<Class<?>> params = new LinkedHashSet<>(Arrays.asList(ctor.getParameterTypes()));
+    if (params.equals(requiredSet)) { /* candidate */ }
+}
+```
+
+The consequences of "set equality" are worth stating explicitly:
+
+| Rule | Meaning |
+|---|---|
+| **Order-independent** | `requires(A, B)` matches both `(A a, B b)` and `(B b, A a)`. Matching is by the *set* of types. |
+| **No duplicates in a set** | Two parameters of the same type collapse in a set. Don't require the same type twice. |
+| **Exactly the required types** | The constructor's parameter types must be *exactly* the required set — no extra, no missing. |
+
+### Rule 3 — Exactly one match, or it faults
+
+- **Zero** matching constructors →
+  `no constructor found matching required types: [...]`.
+- **Two or more** matching constructors → **ambiguous**:
+  `ambiguous constructor — declare exactly one constructor matching your requires list`.
+
+So: declare exactly one constructor whose parameters match your `requires` list.
+
+### Rule 4 — Non-public constructors are allowed
+
+The resolver calls `matched.setAccessible(true)` before invoking, so your injected
+constructor can be `private`/`package-private`. This is unlike the JDK
+`ServiceLoader`, which demands a public no-arg constructor — a restriction ModuleKit
+avoids on purpose (see [Discovery](./discovery.mdx#why-not-serviceloader)).
+
+### Rule 5 — Missing service → fault
+
+For each parameter, the resolver pulls the instance from the registry by type. If
+any is missing:
+
+```
+service not found in registry for type com.example.AuthService
+```
+
+In normal operation this cannot happen for a correctly-declared dependency, because
+ordering guarantees the provider ran first. It *does* happen if a module `provides`
+a type but forgot to `register` it, or if an external service was declared but never
+actually put in the registry.
+
+### Rule 6 — A throwing constructor → fault
+
+If your constructor itself throws, the resolver unwraps the cause and reports it —
+it does not propagate:
+
+```
+constructor threw exception: <your exception message>
+```
+
+## Worked example
+
+```java
+// Descriptor:
+ModuleDescriptor.builder("reporting", "Reporting")
+    .requires(DatabaseService.class, AuthService.class)
+    .build();
+
+// Constructor — note the parameters are the SAME SET as requires, order flipped:
+public ReportingModule(AuthService auth, DatabaseService db) { ... }
+```
+
+Resolution:
+
+```
+requiredSet = {DatabaseService, AuthService}
+scan constructors:
+   ReportingModule(AuthService, DatabaseService)
+     params = {AuthService, DatabaseService} == requiredSet ✓  (order ignored)
+match found (exactly one) → pull instances by type from registry →
+   args = [ registry[AuthService], registry[DatabaseService] ]
+newInstance(args) → ReportingModule ready
+```
+
+## Why constructor injection, not field injection?
+
+ModuleKit injects through the **constructor**, never by reflecting into fields.
+That is a deliberate design choice with real benefits:
+
+- **Immutability** — dependencies can be `final` fields, set once.
+- **Honesty** — a module's constructor signature *is* its dependency list; it can't
+  secretly depend on something not in `requires`.
+- **Testability** — you can `new ReportingModule(mockDb, mockAuth)` in a unit test
+  with no framework at all.
+- **Fail-fast** — a module is either fully constructed with everything it needs, or
+  it faults. There is no half-initialised state with `null` dependencies.
+
+## Where injection is invoked
+
+`InjectionResolver.resolve` is called by the adapter's manager during its load
+phase — for example inside `PaperModuleManager.runLoad()` and
+`MinestomModuleManager.runInitialize()`. If you write your own adapter you call it
+yourself; that is exactly what the [custom adapter guide](../adapters/custom-adapter.mdx)
+shows.
+
+## Continue
+
+Next: [Lifecycle & States](./lifecycle-and-states.mdx) — what happens to a module
+after it is constructed.

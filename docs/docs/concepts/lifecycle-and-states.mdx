@@ -1,0 +1,188 @@
+---
+sidebar_position: 7
+title: Lifecycle & States
+---
+
+import States from '@site/static/img/diagrams/states.svg';
+
+# Lifecycle & States
+
+A constructed module is not yet *doing* anything. The lifecycle drives it from
+inert to active and back. This page covers the phases, the `LoadContext` you get
+during load, the state model, and how faults work — the runtime half of ModuleKit.
+
+## The phases
+
+The exact method names come from the adapter, but the shape is universal:
+
+| Phase | Typical method | What you do |
+|---|---|---|
+| **Load** | `onLoad(LoadContext ctx)` | Register the services you provide, read config, open connections. One-time setup. |
+| **Enable** | `onEnable()` | Start doing work: schedule tasks, register listeners, activate functionality. |
+| **Disable** | `onDisable()` | Undo enable: cancel tasks, close connections, release resources. Runs in **reverse** load order. |
+| **Reload** | `onReload(LoadContext ctx)` | Re-apply configuration. Default on adapters is `disable → load → enable`; override for a lighter, config-only reload. |
+
+### Why disable runs in reverse
+
+If `reporting` loaded *after* `database` (because it depends on it), then on
+shutdown `reporting` must stop *before* `database` goes away — otherwise reporting
+might use a database that's already closed. The manager guarantees this by running
+disable through `runActionReversed` (see [Module Manager](./module-manager.mdx)).
+
+```
+load order:     auth → database → reporting
+disable order:  reporting → database → auth   (reverse)
+```
+
+### Load vs enable — a rule of thumb
+
+- **`onLoad`**: *declare and prepare.* Register services. Do not start listeners or
+  timers here — other modules may not be enabled yet.
+- **`onEnable`**: *go live.* Everything is loaded and services are all registered;
+  now it is safe to interact with the running system.
+
+On the Paper adapter this distinction is enforced by advice: register Bukkit
+listeners in `onEnable`, never `onLoad`. See [the Paper adapter](../adapters/paper.mdx#listeners).
+
+## `LoadContext`
+
+During the load phase your module is handed a `LoadContext` — its single, scoped
+window into the framework. The interface is small:
+
+```java title="modulekit-api / LoadContext.java"
+public interface LoadContext {
+    Logger logger();
+    Path   dataFolder();
+    <T> void register(Class<T> type, T instance);
+    void   markFaulty(String reason);
+}
+```
+
+### `register(type, instance)`
+
+Publishes a service into the registry so other modules can have it injected. This
+is how you fulfil a `provides` declaration.
+
+:::warning Only valid during load
+`register` works **only** while the load phase is active. The concrete
+implementation (`PaperLoadContext` / `MinestomLoadContext`) tracks a
+`loadPhaseActive` flag; after load it logs a warning and ignores the call:
+
+```
+[modulekit] register() called outside onLoad for module reporting — ignored
+```
+
+Register everything you provide during `onLoad`, up front.
+:::
+
+### `dataFolder()`
+
+Returns a `Path` to a per-module data directory — `rootDataFolder/<moduleId>`. Each
+module gets its own, keyed by id, so two modules never collide on disk.
+
+:::note Not created for you
+`dataFolder()` returns a path; it does **not** create the directory. If you write to
+it, create it yourself first:
+
+```java
+Path dir = ctx.dataFolder();
+Files.createDirectories(dir);
+Files.writeString(dir.resolve("state.json"), json);
+```
+:::
+
+### `logger()`
+
+A `Logger` scoped to this module — its name is `rootLoggerName.<moduleId>`, so log
+lines are attributable to the module that produced them.
+
+### `markFaulty(reason)`
+
+Aborts this module's activation from inside `onLoad`. Use it when the module
+discovers at runtime that it cannot function — a missing config file, an
+unreachable external system:
+
+```java
+@Override
+public void onLoad(LoadContext ctx) {
+    if (!configFile.exists()) {
+        ctx.markFaulty("config.yml not found");
+        return;
+    }
+    ...
+}
+```
+
+A module marked faulty this way is set to the faulty state and skipped in enable and
+every later phase — and its `LoadResult` fault is recorded with your reason.
+
+## States
+
+`Module<S>` is generic over a state enum `S` that you (or the adapter) define.
+ModuleKit's core stores the current `S` per module and updates it as phases run; it
+does not hard-code any particular states. The two adapters define their own:
+
+<figure className="mk-figure">
+  <States role="img" />
+</figure>
+
+State is held in the [`ModuleContext`](./module-manager.mdx#modulecontext), and
+mirrored onto the module itself (`ModuleContext.setState` also calls
+`module.setState`). You read a module's state with `module.state()`; the Paper
+command guard uses exactly this to decide whether a command may run.
+
+## Faults
+
+A module reaches the **faulty** state (whatever value the adapter passes as its
+`faultyState`) when any of these happen:
+
+| When | Reason recorded |
+|---|---|
+| Discovery | `no descriptor accessor found on ...` |
+| Graph — missing provider | `no provider found for required service ...` |
+| Graph — duplicate provider | `duplicate provider for ... (already provided by ...)` |
+| Graph — cycle | `circular dependency detected` |
+| Injection — no match | `no constructor found matching required types: [...]` |
+| Injection — ambiguous | `ambiguous constructor — declare exactly one constructor ...` |
+| Injection — threw | `constructor threw exception: ...` |
+| Load | whatever you pass to `ctx.markFaulty(reason)` |
+
+Key properties of a fault:
+
+- **Terminal.** A faulty module stays faulty; it is skipped in every lifecycle phase
+  and does not auto-recover. (On Paper you can explicitly retry via
+  `loadAndEnableModule` — see the [Paper adapter](../adapters/paper.mdx#runtime-toggling).)
+- **Isolated.** A faulty module never stops *unrelated* modules from loading. The
+  only knock-on effect is on modules that **depend** on it: their required service
+  never gets registered, so they fault too (with a "no provider" or "service not
+  found" reason).
+
+## `LoadResult`
+
+The load phase returns a `LoadResult` summarising what happened. It is your handle
+on faults at startup:
+
+```java title="modulekit-core / ModuleManager.LoadResult"
+public record LoadResult(List<String> loaded, List<FaultEntry> faulted) {
+    public record FaultEntry(String moduleId, String reason) {}
+    public boolean isClean() { return faulted.isEmpty(); }
+}
+```
+
+```java
+LoadResult result = modules.runLoad();
+if (!result.isClean()) {
+    for (LoadResult.FaultEntry f : result.faulted()) {
+        logger.severe("Module '" + f.moduleId() + "' failed: " + f.reason());
+    }
+}
+```
+
+Both adapters also log a one-line summary automatically, e.g.
+`Load phase complete: 3 loaded, 1 faulty`, followed by a `FAULTY <id> — <reason>`
+line per fault.
+
+## Continue
+
+Next: [Module Manager](./module-manager.mdx) — the object that stores all this and
+runs the ordered actions.

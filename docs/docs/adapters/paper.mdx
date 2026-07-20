@@ -1,0 +1,294 @@
+---
+sidebar_position: 1
+title: Paper Adapter
+---
+
+import PaperStates from '@site/static/img/diagrams/paper-states.svg';
+
+# Paper Adapter
+
+`modulekit-paper` integrates ModuleKit with [Paper](https://papermc.io/) plugins. It
+bundles the boilerplate every server module needs on top of the raw contract: a
+`JavaPlugin` handle, automatic Bukkit-listener cleanup, and Brigadier command
+registration with a module-state guard. This page covers the whole adapter.
+
+If you have not read [Lifecycle & States](../concepts/lifecycle-and-states.mdx) and
+[the Module Manager](../concepts/module-manager.mdx), skim them first — this page
+builds on them.
+
+## The pieces
+
+| Class | Role |
+|---|---|
+| `PaperModule` | Base class for your modules. Fixes the state enum and adds Paper conveniences. |
+| `PaperModuleManager` | The manager. Drives `runLoad` / `runEnable` / `runDisable`, plus runtime toggling and command registration. |
+| `PaperModuleState` | `DISABLED → LOADED → ENABLED`, plus `FAULTY`. |
+| `PaperLoadContext` | The `LoadContext` implementation handed to modules during load. |
+| `CommandRegistration` | A record describing a command a module wants registered. |
+| `ModuleAwareCommand` | Wraps a command so it is blocked while its module isn't enabled. |
+
+## `PaperModule`
+
+Extend `PaperModule` instead of `Module`. It fixes `S = PaperModuleState` and gives
+you a cleaner set of hooks:
+
+```java title="GamemodeModule.java"
+public final class GamemodeModule extends PaperModule {
+
+    public GamemodeModule(JavaPlugin plugin) {
+        super(plugin); // the owning plugin, stored as `protected final plugin`
+    }
+
+    public static ModuleDescriptor getDescriptor() {
+        return ModuleDescriptor.builder("gamemode", "Gamemode").build();
+    }
+
+    @Override public ModuleDescriptor descriptor() { return getDescriptor(); }
+
+    @Override
+    protected void onLoad() {                  // note: no-arg
+        register(GamemodeService.class, new GamemodeServiceImpl());
+    }
+
+    @Override
+    public void onEnable() {
+        registerListener(new GamemodeListener()); // tracked; auto-removed on disable
+    }
+
+    @Override
+    public void onDisable() {
+        super.onDisable();  // unregisters tracked listeners — keep this
+    }
+
+    @Override
+    public List<CommandRegistration> commands() {
+        return List.of(new CommandRegistration(
+            "gamemode", "Switch gamemode", List.of("gm"), new GamemodeCommand()));
+    }
+}
+```
+
+### The constructor takes the `JavaPlugin`
+
+`PaperModule`'s constructor takes the owning plugin and stores it as `protected
+final JavaPlugin plugin`. Because that is not a no-arg constructor, discovery cannot
+instantiate the class to read its descriptor — so you **must** use the static
+`getDescriptor()` pattern (see [Discovery](../concepts/discovery.mdx#resolving-the-descriptor)).
+
+How does the plugin get injected? The manager pre-registers the `JavaPlugin` as an
+[external service](../concepts/module-manager.mdx#external-services), so
+`requires(JavaPlugin.class)` is satisfied at construction — and `PaperModule`'s
+constructor signature `(JavaPlugin)` is matched by the injector automatically. You
+do **not** list `JavaPlugin` in `requires()`; the adapter handles it.
+
+### `onLoad()` is no-arg here
+
+On the raw contract, load is `onLoad(LoadContext ctx)`. `PaperModule` makes that
+method **final** — it stashes the context for you and calls a no-arg `onLoad()`:
+
+```java title="inside PaperModule"
+public final void onLoad(LoadContext ctx) {
+    this.loadCtx = ctx;
+    try { onLoad(); } finally { this.loadCtx = null; }
+}
+protected void onLoad() {}   // ← you override this
+```
+
+So you override the **no-arg** `onLoad()` (and `onReload()`), and use the
+convenience methods below instead of touching the context directly. The same
+final-wrapper trick applies to `onReload`.
+
+### Convenience methods
+
+Because the context is stashed, `PaperModule` exposes shortcuts valid **only during
+`onLoad()`**:
+
+| Method | Delegates to | Valid |
+|---|---|---|
+| `register(Class<T>, T)` | `loadCtx.register(...)` | during `onLoad()` |
+| `markFaulty(String)` | `loadCtx.markFaulty(...)` | during `onLoad()` |
+| `registerListener(Listener)` | `Bukkit`'s plugin manager, and tracks it | during `onEnable()` |
+
+### Listeners
+
+`registerListener(listener)` registers the listener against your plugin **and**
+records it. The default `onDisable()` unregisters every tracked listener via
+`HandlerList.unregisterAll`:
+
+```java title="inside PaperModule"
+protected void registerListener(Listener listener) {
+    Bukkit.getPluginManager().registerEvents(listener, plugin);
+    listeners.add(listener);
+}
+public void onDisable() {
+    listeners.forEach(HandlerList::unregisterAll);
+    listeners.clear();
+}
+```
+
+:::warning Two rules for listeners
+1. Register listeners in **`onEnable()`**, never `onLoad()` — during load, other
+   modules may not be enabled yet.
+2. If you **override `onDisable()`**, call `super.onDisable()` so the automatic
+   unregister still runs. Forgetting this leaks listeners across reloads.
+:::
+
+### `onReload()`
+
+The default reload is `disable → load → enable`:
+
+```java
+protected void onReload() { onDisable(); onLoad(); onEnable(); }
+```
+
+Override it for a lighter, config-only reload when a full cycle is overkill.
+
+## `PaperModuleManager`
+
+The manager drives the whole lifecycle. The consuming plugin only forwards three
+calls:
+
+```java title="MyPlugin.java"
+public final class MyPlugin extends JavaPlugin {
+
+    private PaperModuleManager modules;
+
+    @Override
+    public void onLoad() {
+        modules = new PaperModuleManager(this);
+        modules.discover(getClass().getClassLoader());
+        LoadResult result = modules.runLoad();
+        if (!result.isClean()) {
+            result.faulted().forEach(f ->
+                getLogger().severe("[" + f.moduleId() + "] " + f.reason()));
+        }
+    }
+
+    @Override public void onEnable()  { modules.runEnable(); }
+    @Override public void onDisable() { modules.runDisable(); }
+}
+```
+
+### What the three phases do
+
+| Call | Maps to | Behaviour |
+|---|---|---|
+| `runLoad()` | Paper's `onLoad` | For each module in order: inject (if not already built) → `onLoad()` → set `LOADED`, or record a fault. Returns a `LoadResult`. |
+| `runEnable()` | Paper's `onEnable` | For each `LOADED` module in order: `onEnable()` → set `ENABLED`. |
+| `runDisable()` | Paper's `onDisable` | For each `ENABLED` module in **reverse** order: `onDisable()` → set `DISABLED`. |
+
+Construction detail: `PaperModuleManager` builds a `PaperLoadContextFactory` from
+the plugin's data folder and logger, and pre-registers the plugin itself:
+
+```java
+contextFactory.registry().put(JavaPlugin.class, plugin);
+```
+
+That single line is what makes `JavaPlugin` injectable everywhere.
+
+### Data folders
+
+Each module's `ctx.dataFolder()` resolves to `plugin data folder / <moduleId>`, so
+`gamemode` writes under `plugins/MyPlugin/gamemode/`. As always, the directory is
+**not** created for you.
+
+## Commands
+
+Commands are the one platform concern the adapter owns, because guarding a command
+by module state has to live in the framework. A module declares its commands:
+
+```java
+@Override
+public List<CommandRegistration> commands() {
+    return List.of(new CommandRegistration(
+        "gamemode", "Switch gamemode", List.of("gm"), new GamemodeCommand()));
+}
+```
+
+`CommandRegistration` is a record:
+
+```java
+public record CommandRegistration(
+    String name,
+    String description,
+    Collection<String> aliases,
+    BasicCommand command,
+    boolean bypassModuleGuard   // defaults to false via the 4-arg constructor
+) {}
+```
+
+### Registering them
+
+Wire the commands once, from Paper's Brigadier `COMMANDS` lifecycle event:
+
+```java title="in your plugin"
+getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, event ->
+    modules.registerCommands(event.registrar(), (source, moduleId) ->
+        source.getSender().sendMessage("That feature is currently disabled.")));
+```
+
+`registerCommands(registrar, onBlocked)` walks every module's `commands()` and
+registers each with the Brigadier registrar.
+
+### The guard
+
+Unless a `CommandRegistration` sets `bypassModuleGuard = true`, the command is
+wrapped in a `ModuleAwareCommand`. While the owning module is **not `ENABLED`**:
+
+- executing the command runs your `onBlocked` callback instead of the real command,
+  and
+- tab-completion returns nothing (`suggest` returns an empty list).
+
+```java title="inside ModuleAwareCommand"
+public void execute(CommandSourceStack source, String[] args) {
+    if (!isEnabled()) { onBlocked.accept(source, moduleName); return; }
+    delegate.execute(source, args);
+}
+public Collection<String> suggest(CommandSourceStack source, String[] args) {
+    if (!isEnabled()) return List.of();
+    return delegate.suggest(source, args);
+}
+```
+
+`isEnabled()` checks `moduleManager.getModule(id).map(m -> m.state() == ENABLED)`.
+This is why command authors don't have to check module state themselves — register
+the command up front and the guard handles the "feature is off" case. Set
+`bypassModuleGuard = true` only for commands that must work regardless of module
+state (rare — e.g. a command that *enables* the module).
+
+## Runtime toggling
+
+`PaperModuleManager` can enable and disable individual modules at runtime, which is
+perfect for an admin command that flips a feature without restarting the server:
+
+| Method | Effect |
+|---|---|
+| `loadAndEnableModule(id)` | Re-runs inject → `onLoad` → `onEnable` on a `DISABLED` module. Returns `true` if it ends up `ENABLED`. Clears any stored fault reason on success. |
+| `disableModule(id)` | Runs `onDisable` on an `ENABLED` module and sets it `DISABLED`. |
+| `markFaulty(id, reason)` | Forces a module to `FAULTY` with a reason, running no lifecycle. |
+| `faultReason(id)` | Returns the stored fault reason, if any. |
+| `registerService(type, impl)` | Pre-register an extra external service before load. |
+
+```java
+// admin command handlers
+if (!modules.loadAndEnableModule("economy"))
+    sender.sendMessage("Could not enable economy: "
+        + modules.faultReason("economy").orElse("unknown"));
+
+modules.disableModule("economy");
+```
+
+`loadAndEnableModule` only acts on a currently-`DISABLED` module (it returns `false`
+otherwise), and re-injects if the module was never constructed — so it also works to
+retry a module that faulted during injection, once you've fixed the cause.
+
+## Full state model
+
+<figure className="mk-figure">
+  <PaperStates role="img" />
+</figure>
+
+## Continue
+
+- [Minestom adapter](./minestom.mdx) — the other bundled adapter, for comparison.
+- [Writing your own adapter](./custom-adapter.mdx) — build one for any runtime.

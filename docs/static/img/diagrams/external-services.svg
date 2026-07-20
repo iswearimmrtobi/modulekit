@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 180" font-family="var(--ifm-font-family-monospace)" role="img" aria-label="A required external service like JavaPlugin is exempt from graph edges but must still be present in the injection registry.">
+  <defs>
+    <marker id="ar-ext" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--mk-line)"/>
+    </marker>
+  </defs>
+
+  <!-- branch connectors -->
+  <g stroke="var(--mk-line)" stroke-width="2" fill="none">
+    <path d="M240,90 L275,90 M275,40 L275,140 M275,40 L296,40 M275,140 L296,140"/>
+    <line x1="275" y1="40" x2="298" y2="40" marker-end="url(#ar-ext)"/>
+    <line x1="275" y1="140" x2="298" y2="140" marker-end="url(#ar-ext)"/>
+  </g>
+
+  <!-- source -->
+  <rect x="20" y="62" width="220" height="56" rx="10" fill="var(--mk-box-fill-2)" stroke="var(--mk-box-stroke)" stroke-width="1.5"/>
+  <text x="130" y="87" text-anchor="middle" font-size="13" font-weight="700" fill="var(--mk-text)">requires(</text>
+  <text x="130" y="105" text-anchor="middle" font-size="13" font-weight="700" fill="var(--mk-accent)">JavaPlugin.class)</text>
+
+  <!-- graph branch -->
+  <rect x="300" y="14" width="404" height="52" rx="10" fill="var(--mk-core-bg)" stroke="var(--mk-core)" stroke-width="1.5"/>
+  <text x="318" y="37" font-size="12.5" font-weight="700" fill="var(--mk-core)">GRAPH</text>
+  <text x="382" y="37" font-size="12" fill="var(--mk-text)">it is an external service</text>
+  <text x="318" y="55" font-size="11.5" fill="var(--mk-muted)">no edge is created, no missing-provider fault</text>
+
+  <!-- injection branch -->
+  <rect x="300" y="114" width="404" height="52" rx="10" fill="var(--mk-adapter-bg)" stroke="var(--mk-adapter)" stroke-width="1.5"/>
+  <text x="318" y="137" font-size="12.5" font-weight="700" fill="var(--mk-adapter)">INJECTION</text>
+  <text x="400" y="137" font-size="12" fill="var(--mk-text)">the registry must still</text>
+  <text x="318" y="155" font-size="11.5" fill="var(--mk-muted)">supply the real instance, or construction faults</text>
+</svg>

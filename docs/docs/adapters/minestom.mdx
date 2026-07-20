@@ -1,0 +1,165 @@
+---
+sidebar_position: 2
+title: Minestom Adapter
+---
+
+# Minestom Adapter
+
+`modulekit-minestom` integrates ModuleKit with [Minestom](https://minestom.net/).
+Unlike Paper, Minestom has no plugin container of its own — you write a normal Java
+`main()` that boots the server. So this adapter is a **standalone manager** you
+construct and drive yourself, with a lean two-phase lifecycle.
+
+## The pieces
+
+| Class | Role |
+|---|---|
+| `MinestomModule` | Base class for your modules. Declares the two-phase lifecycle. |
+| `MinestomModuleManager` | The manager. Drives `runInitialize` / `runTerminate`. |
+| `MinestomModuleState` | `DISABLED → INITIALIZED`, plus `FAULTY`. |
+| `MinestomLoadContext` | The `LoadContext` implementation handed to modules during initialize. |
+
+## `MinestomModule`
+
+Extend `MinestomModule`. Its lifecycle is just two methods — and unlike Paper's,
+**both are abstract**, so you must implement them (there is no default no-op):
+
+```java title="modulekit-minestom / MinestomModule.java"
+public abstract class MinestomModule extends Module<MinestomModuleState> {
+    public abstract void onInitialize(LoadContext ctx); // setup + register services
+    public abstract void onTerminate();                 // cleanup
+}
+```
+
+A concrete module:
+
+```java title="WorldModule.java"
+public final class WorldModule extends MinestomModule {
+
+    public static ModuleDescriptor getDescriptor() {
+        return ModuleDescriptor.builder("world", "World")
+            .provides(WorldService.class)
+            .build();
+    }
+
+    @Override public ModuleDescriptor descriptor() { return getDescriptor(); }
+
+    @Override
+    public void onInitialize(LoadContext ctx) {
+        // register the service we provide…
+        ctx.register(WorldService.class, new WorldServiceImpl());
+        // …and register Minestom event listeners, set up instances, etc.
+    }
+
+    @Override
+    public void onTerminate() {
+        // release resources, save state
+    }
+}
+```
+
+Note that on Minestom you work with the `LoadContext` **directly** (`ctx.register`,
+`ctx.dataFolder`, `ctx.markFaulty`, `ctx.logger`) — there are no stashed convenience
+wrappers as on Paper. That is intentional: the Minestom adapter is deliberately
+thinner. See [`LoadContext`](../concepts/lifecycle-and-states.mdx#loadcontext).
+
+## `MinestomModuleManager`
+
+You construct the manager with a data directory and a logger, then run the two
+phases around your server's life:
+
+```java title="Main.java"
+import net.minestom.server.MinecraftServer;
+
+public final class Main {
+    public static void main(String[] args) {
+        MinecraftServer server = MinecraftServer.init();
+
+        MinestomModuleManager modules =
+            new MinestomModuleManager(Path.of("data"), Logger.getLogger("app"));
+
+        modules.discover(Main.class.getClassLoader());
+        LoadResult result = modules.runInitialize();   // discover → inject → onInitialize
+        if (!result.isClean()) {
+            result.faulted().forEach(f ->
+                System.err.println("[" + f.moduleId() + "] " + f.reason()));
+        }
+
+        server.start("0.0.0.0", 25565);
+
+        Runtime.getRuntime().addShutdownHook(
+            new Thread(modules::runTerminate));         // reverse order on shutdown
+    }
+}
+```
+
+### The two phases
+
+| Call | Behaviour |
+|---|---|
+| `runInitialize()` | For each module in load order: inject (if not already built) → `onInitialize(ctx)` → set `INITIALIZED`, or record a fault. Returns a `LoadResult`, logs a summary. |
+| `runTerminate()` | For each `INITIALIZED` module in **reverse** order: `onTerminate()` → set `DISABLED`. |
+
+`runInitialize` collapses what Paper splits into load+enable into a single phase —
+Minestom modules don't have a separate "loaded but not live" state. The manager
+builds a `MinestomLoadContextFactory` from your data directory and logger; each
+module's `ctx.dataFolder()` resolves to `dataDirectory / <moduleId>` (and, as
+always, is not created for you).
+
+## Paper vs Minestom at a glance
+
+Both adapters sit on the identical core — discovery, dependency graph, topological
+sort, and injection are shared code. They differ only in how they wrap the
+lifecycle:
+
+| | Paper | Minestom |
+|---|---|---|
+| Host integration | Plugs into an existing `JavaPlugin` container | A manager you own, driven from `main()` |
+| Phases | `load → enable → disable` (three) | `initialize → terminate` (two) |
+| States | `DISABLED, LOADED, ENABLED, FAULTY` | `DISABLED, INITIALIZED, FAULTY` |
+| Lifecycle hooks | `onLoad()` (no-arg, wrapped), `onEnable()`, `onDisable()` | `onInitialize(ctx)`, `onTerminate()` (both abstract) |
+| `LoadContext` access | Via convenience methods (`register`, `markFaulty`) | Direct on the `ctx` argument |
+| Listener bookkeeping | Yes — `registerListener` auto-unregisters | No — you manage Minestom listeners yourself |
+| Command registration | Yes — `CommandRegistration` + state guard | No — use Minestom's command API in `onInitialize` |
+| Runtime toggling | Yes — `loadAndEnableModule` / `disableModule` | Not built in |
+| External services | `JavaPlugin` pre-registered automatically | None by default (register your own) |
+
+If you need something the Minestom adapter doesn't provide (say, external services or
+runtime toggling), that logic is easy to add in a subclass — everything the Paper
+adapter does is built from the same `ModuleManager` primitives. See
+[Writing your own adapter](./custom-adapter.mdx).
+
+## Making host objects injectable
+
+Minestom's manager registers no external services, and — unlike the Paper adapter —
+it keeps its internal service registry private, so there is no built-in hook to
+pre-register a `MinecraftServer` or a config object for injection. You have two
+honest options today:
+
+1. **Provide it from a tiny bootstrap module.** Write a dependency-free module whose
+   only job is to `ctx.register(MinecraftServer.class, server)` in `onInitialize`.
+   Because it has no `requires`, it loads first, and any module that
+   `requires(MinecraftServer.class)` then receives it. (Pass the server into that
+   module by constructing it yourself and adding it with `addModule` — see below.)
+
+2. **Add pre-built modules with `addModule`.** If a module needs host objects that
+   aren't modelled as services, construct it by hand and register the instance:
+
+   ```java
+   modules.addModule(new LobbyModule(server, config)); // skips injection for this one
+   modules.discover(loader);                            // discover the rest
+   modules.runInitialize();
+   ```
+
+   `addModule` stores an already-constructed instance, so the load phase skips
+   injection for it (see [Module Manager](../concepts/module-manager.mdx#registering-a-module-manually)).
+
+If you want Paper-style external services on Minestom, model a custom manager on
+`MinestomModuleManager` that exposes its registry and overrides `externalServices()`
+— see [Writing your own adapter](./custom-adapter.mdx) and
+[Module Manager → External services](../concepts/module-manager.mdx#external-services).
+
+## Continue
+
+- [Paper adapter](./paper.mdx)
+- [Writing your own adapter](./custom-adapter.mdx)

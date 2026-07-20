@@ -1,0 +1,213 @@
+---
+sidebar_position: 3
+title: Writing Your Own Adapter
+---
+
+# Writing Your Own Adapter
+
+Nothing about `modulekit-core` is Minecraft-specific. If you want to use ModuleKit
+in a plain Java application — a CLI, a service, a batch job — or on some other host,
+you write a small adapter. This page shows how, using the same building blocks the
+Paper and Minestom adapters use.
+
+You should read [The Module Manager](../concepts/module-manager.mdx) and
+[Dependency Injection](../concepts/dependency-injection.mdx) first — this page
+assembles those pieces.
+
+## What an adapter is
+
+An adapter is three things:
+
+1. A **state enum** describing your lifecycle.
+2. A **module base class** extending `Module<YourState>` (optional, but usually nice
+   to add host conveniences).
+3. A **manager** extending `ModuleManager<YourModule, YourState>` that implements
+   the phases using `runAction` / `runActionReversed` and `InjectionResolver`.
+
+The base `ModuleManager` already gives you discovery, storage, ordering, and
+lookups. You are only writing the lifecycle driver.
+
+## Step 1 — Define the state
+
+```java
+public enum AppModuleState { DISABLED, LOADED, ENABLED, FAULTY }
+```
+
+## Step 2 — Define the module base
+
+Pick your lifecycle hooks. Here we mirror Paper's three phases:
+
+```java
+public abstract class AppModule extends Module<AppModuleState> {
+    public void onLoad(LoadContext ctx) {} // register services here
+    public void onEnable()  {}
+    public void onDisable() {}
+}
+```
+
+## Step 3 — Provide a `LoadContext`
+
+You need a `LoadContext` implementation to hand modules during load. The two adapter
+implementations (`PaperLoadContext`, `MinestomLoadContext`) are identical in shape;
+copy that shape. It needs to: register into a shared registry, expose a per-module
+data folder and logger, and record `markFaulty`.
+
+```java
+public final class AppLoadContext implements LoadContext {
+    private final String moduleId;
+    private final Path dataFolder;
+    private final Logger logger;
+    private final Map<Class<?>, Object> registry;   // shared with the injector
+    private boolean loadPhaseActive = true;
+    private boolean markedFaulty = false;
+    private String faultReason;
+
+    public AppLoadContext(String id, Path dataFolder, Logger logger, Map<Class<?>, Object> registry) {
+        this.moduleId = id; this.dataFolder = dataFolder;
+        this.logger = logger; this.registry = registry;
+    }
+
+    @Override public Logger logger()   { return logger; }
+    @Override public Path dataFolder() { return dataFolder; }
+
+    @Override public <T> void register(Class<T> type, T instance) {
+        if (!loadPhaseActive) {                       // enforce "only during load"
+            logger.warning("register() outside onLoad for " + moduleId + " — ignored");
+            return;
+        }
+        registry.put(type, instance);
+    }
+
+    @Override public void markFaulty(String reason) {
+        markedFaulty = true; faultReason = reason;
+    }
+
+    public void closeLoadPhase()   { loadPhaseActive = false; }
+    public boolean isMarkedFaulty(){ return markedFaulty; }
+    public String faultReason()    { return faultReason; }
+}
+```
+
+The `loadPhaseActive` flag is what makes `register` a no-op after load — flip it with
+`closeLoadPhase()` right after calling the module's `onLoad`.
+
+## Step 4 — Write the manager
+
+This is the heart of an adapter. It holds the shared registry, and drives the phases
+with the base primitives. Compare this to `PaperModuleManager` — it is the same
+pattern.
+
+```java
+public final class AppModuleManager extends ModuleManager<AppModule, AppModuleState> {
+
+    private final Map<Class<?>, Object> registry = new HashMap<>();
+    private final Path dataRoot;
+
+    public AppModuleManager(Path dataRoot) {
+        super(AppModuleState.DISABLED, AppModuleState.FAULTY);
+        this.dataRoot = dataRoot;
+    }
+
+    // Pre-register a host object so modules may require() it.
+    public <T> void registerService(Class<T> type, T instance) { registry.put(type, instance); }
+
+    // Tell the dependency graph these types are satisfied externally.
+    @Override protected Set<Class<?>> externalServices() { return registry.keySet(); }
+
+    public LoadResult runLoad() {
+        List<String> loaded = new ArrayList<>();
+        List<LoadResult.FaultEntry> faulted = new ArrayList<>();
+
+        runAction(ctx -> {                                   // forward, load order
+            String id = ctx.descriptor().id();
+
+            if (ctx.state() == AppModuleState.FAULTY) {      // already flagged in discovery
+                faulted.add(new LoadResult.FaultEntry(id, "faulty before load"));
+                return;
+            }
+
+            if (ctx.module() == null) {                      // construct via injection
+                var injection = InjectionResolver.resolve(ctx.descriptor(), ctx.moduleClass(), registry);
+                if (injection.isFaulty()) {
+                    ctx.setState(AppModuleState.FAULTY);
+                    faulted.add(new LoadResult.FaultEntry(id, injection.faultReason()));
+                    return;
+                }
+                ctx.setModule((AppModule) injection.instance());
+            }
+
+            var loadCtx = new AppLoadContext(id, dataRoot.resolve(id),
+                Logger.getLogger("app." + id), registry);
+            ctx.module().onLoad(loadCtx);                    // module registers its services
+            loadCtx.closeLoadPhase();
+
+            if (loadCtx.isMarkedFaulty()) {
+                ctx.setState(AppModuleState.FAULTY);
+                faulted.add(new LoadResult.FaultEntry(id, loadCtx.faultReason()));
+                return;
+            }
+
+            ctx.setState(AppModuleState.LOADED);
+            loaded.add(id);
+        });
+
+        return new LoadResult(List.copyOf(loaded), List.copyOf(faulted));
+    }
+
+    public void runEnable() {
+        runAction(ctx -> {
+            if (ctx.state() == AppModuleState.LOADED) {
+                ctx.module().onEnable();
+                ctx.setState(AppModuleState.ENABLED);
+            }
+        });
+    }
+
+    public void runDisable() {
+        runActionReversed(ctx -> {                           // reverse for teardown
+            if (ctx.state() == AppModuleState.ENABLED) {
+                ctx.module().onDisable();
+                ctx.setState(AppModuleState.DISABLED);
+            }
+        });
+    }
+}
+```
+
+The three things to get right:
+
+- **Share one registry** between `register` (in the context) and `InjectionResolver`
+  (in the manager). That is how a module's provided services become available to the
+  next module's constructor.
+- **Guard by state** in each phase (`if state == LOADED` etc.) so faulty and
+  out-of-phase modules are skipped.
+- **Reverse for disable** using `runActionReversed`.
+
+## Step 5 — Use it
+
+```java
+public static void main(String[] args) {
+    AppModuleManager modules = new AppModuleManager(Path.of("data"));
+    modules.registerService(AppContext.class, new AppContext(args)); // external service
+
+    modules.discover(Main.class.getClassLoader());
+    LoadResult result = modules.runLoad();
+    result.faulted().forEach(f -> System.err.println(f.moduleId() + ": " + f.reason()));
+
+    modules.runEnable();
+    Runtime.getRuntime().addShutdownHook(new Thread(modules::runDisable));
+}
+```
+
+## The minimal version
+
+If you don't want a custom `LoadContext` or state model, the base `ModuleManager`
+plus `InjectionResolver` is enough to construct and order modules — you just call
+`onLoad` with your own context. The README's bootstrap example and
+`PaperModuleManager` in the source are the two reference implementations to copy
+from.
+
+## Continue
+
+- Back to [The Module Manager](../concepts/module-manager.mdx) for the primitives.
+- [Reference → Troubleshooting](../reference/troubleshooting.mdx) for fault messages.

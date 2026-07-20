@@ -1,0 +1,153 @@
+---
+sidebar_position: 4
+title: Dependency Graph
+---
+
+import GraphEdges from '@site/static/img/diagrams/graph-edges.svg';
+import ExternalServices from '@site/static/img/diagrams/external-services.svg';
+
+# Dependency Graph
+
+Once modules are discovered, ModuleKit needs to know **who depends on whom**. That
+is the job of `DependencyGraph` in `modulekit-core`. It takes the list of
+descriptors and produces: a service→provider map, dependency edges, a load order,
+and a set of fault reasons. This page walks through how it is built and what
+questions you can ask it.
+
+## Input and output
+
+```java
+DependencyGraph graph = DependencyGraph.build(descriptors, externalServices);
+```
+
+- **`descriptors`** — every discovered `ModuleDescriptor`.
+- **`externalServices`** — types that are satisfied *outside* any module (e.g.
+  Paper's `JavaPlugin`). More on these [below](#external-services).
+
+The result exposes:
+
+| Method | Answers |
+|---|---|
+| `loadOrder()` | The full ordered list of module ids (topological first, cyclic appended). |
+| `isFaulty(id)` / `faultReason(id)` | Was this module rejected, and why? |
+| `directDependenciesOf(id)` | The module ids this module depends on directly. |
+| `dependentsOf(id)` | All modules (transitively) that depend on this one. |
+| `dependencyChain(id)` | Transitive dependencies, ordered dependencies-first. |
+| `serviceProviders()` | The `type → provider id` map. |
+
+## How it is built, step by step
+
+### Step 1 — Map every provided type to a provider
+
+The graph iterates all descriptors and records, for each type in `provides`, which
+module id supplies it:
+
+```
+serviceProviders: {
+    DatabaseService  -> "database",
+    AuthService      -> "auth",
+    ReportingService -> "reporting"
+}
+```
+
+It also collects the ids flagged `system()` into a separate set for later use in
+ordering.
+
+#### Duplicate providers
+
+If two modules provide the **same type**, that is a conflict. The rule is
+**first-wins**: the first module discovered keeps the type; the second is marked
+faulty:
+
+```
+duplicate provider for com.example.DatabaseService
+  (already provided by database)
+```
+
+The first provider is *not* penalised — only the later duplicate is rejected. If
+you genuinely need two implementations of one interface, model them as two distinct
+types (e.g. `PrimaryDatabaseService` / `ReplicaDatabaseService`).
+
+### Step 2 — Turn `requires` into edges
+
+For each module, the graph looks up a provider for every required type:
+
+- If a required type is in `externalServices`, it is **skipped** — satisfied
+  externally, no edge needed.
+- Otherwise it looks up the provider in `serviceProviders`. If found, it adds an
+  edge `module → provider`. If **not** found, the module is marked faulty:
+
+```
+no provider found for required service com.example.AuthService
+```
+
+The loop `break`s on the first missing provider — one missing dependency is enough
+to fault the module.
+
+<figure className="mk-figure mk-figure--narrow">
+  <GraphEdges role="img" />
+</figure>
+
+### Step 3 — Topologically sort
+
+The edge map is handed to `TopologicalSort.sort(dependencies, systemModules)`,
+which returns a safe order plus the set of ids caught in cycles. Every cyclic
+module is marked faulty:
+
+```
+circular dependency detected
+```
+
+The full algorithm — Kahn's algorithm, the `system()` priority tie-break, and how
+cycles are detected — is its own page: [Topological Sort](./topological-sort.mdx).
+
+### Step 4 — Build the reverse map
+
+Finally the graph inverts the edges into a `dependents` map (`id → who depends on
+me`). This is what powers `dependentsOf(id)`, used when you want to know the blast
+radius of disabling or faulting a module.
+
+## External services
+
+Some services are not provided by any module — they come from the host. The
+clearest example is Paper's `JavaPlugin`: it exists before any module loads, and
+many modules want it injected. If the graph treated `requires(JavaPlugin.class)` as
+"needs a provider module", every such module would fault.
+
+`externalServices` solves this. Types in this set:
+
+- are **ignored** when checking for missing providers, and
+- create **no edges** (they're already available, so they don't affect ordering).
+
+They must still be present in the **injection registry** at construction time — the
+graph exemption only stops the *ordering* logic from faulting the module; the
+*injection* still needs the real object. The adapter takes care of both: for
+example `PaperModuleManager` pre-registers the plugin and reports its registry keys
+as `externalServices()`. See [Module Manager](./module-manager.mdx#external-services)
+and [Dependency Injection](./dependency-injection.mdx).
+
+<figure className="mk-figure">
+  <ExternalServices role="img" />
+</figure>
+
+## Querying the graph
+
+Beyond ordering, the graph answers useful structural questions. These are handy in
+admin tooling — e.g. "what breaks if I disable `database`?"
+
+```java
+graph.directDependenciesOf("reporting"); // [database, auth]
+graph.dependencyChain("reporting");      // [auth, database]  (dependencies first)
+graph.dependentsOf("database");          // everything that transitively needs it
+graph.isFaulty("reporting");             // false
+graph.faultReason("reporting");          // Optional.empty()
+```
+
+`dependentsOf` does a breadth-first walk over the reverse edges, so it returns the
+**transitive** closure — every module that would be affected, directly or
+indirectly.
+
+## Continue
+
+Next: [Topological Sort](./topological-sort.mdx) — how the safe load order is
+actually computed, and how cycles are caught.
