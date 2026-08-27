@@ -5,17 +5,17 @@ title: Installation
 
 # Installation
 
-ModuleKit is published under the group id `gg.cubix` at version `1.1.0`. It
+ModuleKit is published under the group id `gg.cubix` at version `1.2.0`. It
 targets **Java 25**. This page covers adding it to a Gradle build for the three
 common setups: a plain Java app, a feature module, and a shaded Minecraft plugin.
 
 :::info Artifacts
 | Artifact | When you need it |
 |---|---|
-| `gg.cubix:modulekit-api:1.1.0` | Always. Your module classes compile against this. |
-| `gg.cubix:modulekit-core:1.1.0` | In the application/host that runs discovery and the lifecycle. |
-| `gg.cubix:modulekit-paper:1.1.0` | Paper plugins. Pulls in `api` + `core` transitively. |
-| `gg.cubix:modulekit-minestom:1.1.0` | Minestom servers. Pulls in `api` transitively. |
+| `gg.cubix:modulekit-api:1.2.0` | Always. Your module classes compile against this. |
+| `gg.cubix:modulekit-core:1.2.0` | In the application/host that runs discovery and the lifecycle. |
+| `gg.cubix:modulekit-paper:1.2.0` | Paper plugins. Pulls in `api` + `core` transitively. |
+| `gg.cubix:modulekit-minestom:1.2.0` | Minestom servers. Pulls in `api` transitively. |
 :::
 
 ## A feature module
@@ -28,10 +28,10 @@ It only needs the API to compile. If it references core types (like
 plugins { `java-library` }
 
 dependencies {
-    api("gg.cubix:modulekit-api:1.1.0")
+    api("gg.cubix:modulekit-api:1.2.0")
 
     // Only if this module touches core types directly; usually not needed:
-    compileOnly("gg.cubix:modulekit-core:1.1.0")
+    compileOnly("gg.cubix:modulekit-core:1.2.0")
 
     // Type references to services provided by OTHER modules:
     compileOnly(project(":database")) // for the DatabaseService interface
@@ -59,8 +59,8 @@ plugins {
 }
 
 dependencies {
-    implementation("gg.cubix:modulekit-api:1.1.0")
-    implementation("gg.cubix:modulekit-core:1.1.0")
+    implementation("gg.cubix:modulekit-api:1.2.0")
+    implementation("gg.cubix:modulekit-core:1.2.0")
 
     // Every feature module you want available at runtime:
     implementation(project(":database"))
@@ -109,8 +109,8 @@ plugins {
 }
 
 dependencies {
-    implementation("gg.cubix:modulekit-paper:1.1.0") // brings api + core
-    compileOnly("io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT")
+    implementation("gg.cubix:modulekit-paper:1.2.0") // brings api + core
+    compileOnly("io.papermc.paper:paper-api:26.2.build.119-stable")
 
     implementation(project(":gamemode"))
     implementation(project(":economy"))
@@ -130,8 +130,8 @@ own `main()`.
 
 ```kotlin title="build.gradle.kts"
 dependencies {
-    implementation("gg.cubix:modulekit-minestom:1.1.0")
-    implementation("net.minestom:minestom:2026.06.05-26.1.2")
+    implementation("gg.cubix:modulekit-minestom:1.2.0")
+    implementation("net.minestom:minestom:2026.08.16-26.2")
 
     implementation(project(":world"))
     implementation(project(":lobby"))
