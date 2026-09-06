@@ -16,8 +16,8 @@ start in, hands each one the services it needs, and drives every module through
 a managed lifecycle.
 
 It has no runtime dependencies in its core, works in any plain Java program, and
-ships with two ready-made adapters for the Minecraft server platforms **Paper**
-and **Minestom**.
+ships with ready-made adapters for the Minecraft server platforms **Paper**,
+**Folia** and **Minestom**.
 
 :::tip New here? Read in this order
 1. This page — the mental model.
@@ -56,7 +56,7 @@ public ReportingModule(DatabaseService db, AuthService auth) {
 | **Safe load ordering** | Providers always start before the modules that consume them, computed with a topological sort. |
 | **Fault isolation** | A broken module is quarantined and skipped. The rest of the application still starts. |
 | **Managed lifecycle** | Each module runs through clear phases (`load → enable → disable`) with hooks you override. |
-| **Platform adapters** | Paper and Minestom integrations that map the lifecycle onto the host and add platform niceties. |
+| **Platform adapters** | Paper, Folia and Minestom integrations that map the lifecycle onto the host and add platform niceties. |
 
 ## The three parts of the project
 

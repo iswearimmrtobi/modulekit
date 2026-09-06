@@ -40,7 +40,9 @@ public final class GamemodeModule extends PaperModule {
     }
 
     public static ModuleDescriptor getDescriptor() {
-        return ModuleDescriptor.builder("gamemode", "Gamemode").build();
+        return ModuleDescriptor.builder("gamemode", "Gamemode")
+            .requires(JavaPlugin.class)
+            .build();
     }
 
     @Override public ModuleDescriptor descriptor() { return getDescriptor(); }
@@ -77,9 +79,19 @@ instantiate the class to read its descriptor — so you **must** use the static
 
 How does the plugin get injected? The manager pre-registers the `JavaPlugin` as an
 [external service](../concepts/module-manager.mdx#external-services), so
-`requires(JavaPlugin.class)` is satisfied at construction — and `PaperModule`'s
-constructor signature `(JavaPlugin)` is matched by the injector automatically. You
-do **not** list `JavaPlugin` in `requires()`; the adapter handles it.
+`requires(JavaPlugin.class)` is satisfied at construction and the injector matches
+your `(JavaPlugin)` constructor.
+
+:::warning You must list `JavaPlugin` in `requires()`
+The injector only goes looking for a constructor when `requires` is non-empty. With an
+empty `requires` it takes the **no-arg** path instead, and a module whose constructor
+takes a `JavaPlugin` then faults with `failed to instantiate no-arg module`. Even when
+the plugin is your only dependency, declare it:
+
+```java
+ModuleDescriptor.builder("gamemode", "Gamemode").requires(JavaPlugin.class).build()
+```
+:::
 
 ### `onLoad()` is no-arg here
 
@@ -290,5 +302,6 @@ retry a module that faulted during injection, once you've fixed the cause.
 
 ## Continue
 
+- [Folia adapter](./folia.mdx) — this adapter plus region-aware scheduling, for Folia servers.
 - [Minestom adapter](./minestom.mdx) — the other bundled adapter, for comparison.
 - [Writing your own adapter](./custom-adapter.mdx) — build one for any runtime.
