@@ -5,14 +5,22 @@ import io.papermc.paper.command.brigadier.BasicCommand;
 import io.papermc.paper.command.brigadier.Commands;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
 import java.io.File;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
@@ -80,5 +88,66 @@ class PaperModuleManagerRegisterCommandsTest {
         manager.registerCommands(registrar, (source, moduleId) -> {});
 
         verify(registrar, org.mockito.Mockito.never()).register(any(), any(), anyCollection(), any());
+    }
+
+    /**
+     * Discoverable by {@code discover()}: it exposes a static {@code getDescriptor()}, which is
+     * required because its constructor takes the plugin and so cannot be invoked no-arg.
+     */
+    public static class DiscoverableModule extends PaperModule {
+
+        public DiscoverableModule(JavaPlugin plugin) {
+            super(plugin);
+        }
+
+        public static ModuleDescriptor getDescriptor() {
+            return ModuleDescriptor.builder("discovered", "Discovered")
+                .requires(JavaPlugin.class)
+                .build();
+        }
+
+        @Override public ModuleDescriptor descriptor() { return getDescriptor(); }
+
+        @Override
+        public List<CommandRegistration> commands() {
+            return List.of(new CommandRegistration("disc", "desc", List.of(), mock(BasicCommand.class)));
+        }
+    }
+
+    /** A classloader that serves a module registration file, so discover() finds our fixture. */
+    private ClassLoader loaderRegistering(Path dir, Class<?> moduleClass) throws Exception {
+        Path services = dir.resolve("META-INF/services");
+        Files.createDirectories(services);
+        Files.writeString(services.resolve("gg.cubix.modulekit.api.module.Module"), moduleClass.getName());
+        return new URLClassLoader(new URL[]{dir.toUri().toURL()}, getClass().getClassLoader());
+    }
+
+    @Test
+    void discoveredButNotYetLoadedModule_isSkipped_ratherThanNpe(@TempDir Path dir) throws Exception {
+        JavaPlugin plugin = mockPlugin();
+        PaperModuleManager manager = new PaperModuleManager(plugin);
+        manager.discover(loaderRegistering(dir, DiscoverableModule.class));
+
+        // discover() builds contexts but never instantiates: ctx.module() is null until runLoad().
+        assertEquals(1, manager.contexts().size());
+        assertNull(manager.contexts().get(0).module());
+
+        Commands registrar = mock(Commands.class);
+        assertDoesNotThrow(() -> manager.registerCommands(registrar, (source, moduleId) -> {}));
+
+        verify(registrar, org.mockito.Mockito.never()).register(any(), any(), anyCollection(), any());
+    }
+
+    @Test
+    void discoveredModule_registersItsCommands_onceLoaded(@TempDir Path dir) throws Exception {
+        JavaPlugin plugin = mockPlugin();
+        PaperModuleManager manager = new PaperModuleManager(plugin);
+        manager.discover(loaderRegistering(dir, DiscoverableModule.class));
+        manager.runLoad();
+
+        Commands registrar = mock(Commands.class);
+        manager.registerCommands(registrar, (source, moduleId) -> {});
+
+        verify(registrar).register(eq("disc"), eq("desc"), anyCollection(), any());
     }
 }

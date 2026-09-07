@@ -38,8 +38,8 @@ const FeatureList: FeatureItem[] = [
     description: (
       <>
         The core is plain Java with no dependencies. Bundled adapters for{' '}
-        <code>Paper</code> and <code>Minestom</code> map the lifecycle onto the
-        server for you.
+        <code>Paper</code>, <code>Folia</code> and <code>Minestom</code> map the
+        lifecycle onto the server for you.
       </>
     ),
   },
@@ -49,7 +49,9 @@ function Feature({title, Svg, description}: FeatureItem) {
   return (
     <div className={clsx('col col--4')}>
       <div className="text--center">
-        <Svg className={styles.featureSvg} role="img" />
+        {/* Decorative: the stock illustrations carry their own scaffold <title>
+            ("Powered by React" etc.), so hide them and let the heading speak. */}
+        <Svg className={styles.featureSvg} aria-hidden="true" />
       </div>
       <div className="text--center padding-horiz--md">
         <Heading as="h3">{title}</Heading>

@@ -23,6 +23,7 @@ Modules that fail to load are isolated — they do not prevent unrelated modules
 | `modulekit-api` | Pure contract — `Module`, `ModuleDescriptor`, `LoadContext`. No external dependencies. |
 | `modulekit-core` | Implementation — discovery, dependency graph, topological sort, injection. |
 | `modulekit-paper` | Paper (Minecraft) adapter — bridges the lifecycle to `JavaPlugin`, adds listener bookkeeping and Brigadier command registration. |
+| `modulekit-folia` | Folia (Minecraft) adapter — layers region-aware scheduling on top of `modulekit-paper`. The same jar runs on Folia and Paper. |
 | `modulekit-minestom` | Minestom (Minecraft) adapter — a standalone manager you wire into your own Minestom bootstrap. |
 
 `modulekit-api` and `modulekit-core` have no platform dependencies and work in any plain Java application. The adapter subprojects show how to integrate ModuleKit with a specific runtime; you can write your own by extending `ModuleManager`.
@@ -102,8 +103,8 @@ If no static `getDescriptor()` is found, discovery falls back to calling a no-ar
 plugins { `java-library` }
 
 dependencies {
-    api("gg.cubix:modulekit-api:1.1.0")
-    compileOnly("gg.cubix:modulekit-core:1.1.0")
+    api("gg.cubix:modulekit-api:1.2.0")
+    compileOnly("gg.cubix:modulekit-core:1.2.0")
     compileOnly(project(":database"))  // for DatabaseService type reference
     compileOnly(project(":auth"))      // for AuthService type reference
 }
@@ -348,6 +349,48 @@ Unless a `CommandRegistration` sets `bypassModuleGuard = true`, `registerCommand
 
 ---
 
+## Folia adapter
+
+[Folia](https://github.com/PaperMC/Folia) removes the main thread: chunks are split into regions that tick in parallel, each with its own thread, and `BukkitScheduler` is gone. `modulekit-folia` is a thin layer over `modulekit-paper` that fills the gap — the Paper lifecycle, listener bookkeeping and command registration are all inherited unchanged, because none of them assume a main thread.
+
+`FoliaModule extends PaperModule` and adds one thing: `scheduler()`, a region-aware façade whose tasks are tracked and cancelled on disable, exactly the way `registerListener` already tracks listeners.
+
+```java
+public final class BeaconModule extends FoliaModule {
+
+    public BeaconModule(JavaPlugin plugin) { super(plugin); }
+
+    public static ModuleDescriptor getDescriptor() {
+        return ModuleDescriptor.builder("beacon", "Beacon").requires(JavaPlugin.class).build();
+    }
+
+    @Override public ModuleDescriptor descriptor() { return getDescriptor(); }
+
+    @Override
+    public void onEnable() {
+        registerListener(new BeaconListener());                     // inherited
+        scheduler().global().runRepeating(this::sweep, 0L, 200L);   // added here
+    }
+
+    private void relight(Location where) {
+        scheduler().region(where).run(() -> where.getBlock().setType(Material.BEACON));
+    }
+
+    @Override
+    public void onDisable() {
+        super.onDisable();   // cancels tasks AND unregisters listeners
+    }
+}
+```
+
+Pick the scope by what the work touches: `region(location)` for blocks and world edits, `entity(e)` for anything on an entity or player (entities move between regions, so never schedule entity work on a location), `global()` for server-wide state with no location, and `async()` for I/O. `FoliaPlatform` adds `isFolia()`, `isGlobalTickThread()` and the `isOwnedByCurrentRegion(...)` overloads.
+
+`FoliaModuleManager extends PaperModuleManager` — wire it exactly like the Paper one. It additionally exposes a plugin-scoped `scheduler()` for services that are not modules, registers `ModuleScheduler` as an injectable external service, and logs the detected platform on startup.
+
+You compile against `paper-api`, which ships the regionised scheduler contracts, so **no `folia-api` dependency is needed** and the resulting jar runs on Paper too. Your plugin must declare `folia-supported: true` in its `paper-plugin.yml`, or Folia refuses to load it — that file is yours, so ModuleKit cannot add it for you.
+
+---
+
 ## Minestom adapter
 
 `MinestomModule` declares a simpler two-phase lifecycle — `onInitialize(LoadContext ctx)` / `onTerminate()`, both mandatory (no default no-op). `MinestomModuleManager(Path dataDirectory, Logger logger)` is a standalone manager with `runInitialize()` / `runTerminate()` that you wire into your own Minestom bootstrap `main()` — it isn't tied to any extension-loading API.
@@ -363,8 +406,8 @@ plugins {
 }
 
 dependencies {
-    implementation("gg.cubix:modulekit-api:1.1.0")
-    implementation("gg.cubix:modulekit-core:1.1.0")
+    implementation("gg.cubix:modulekit-api:1.2.0")
+    implementation("gg.cubix:modulekit-core:1.2.0")
 
     // Feature modules
     implementation(project(":database"))
@@ -392,4 +435,4 @@ tasks.shadowJar {
 - Messaging or i18n
 - Permission checks
 
-These belong in individual modules or the host application. ModuleKit's single responsibility is discovering modules, resolving their dependencies, injecting them, and managing their lifecycle. (Paper command registration is the one exception — see the Paper adapter section above.)
+These belong in individual modules or the host application. ModuleKit's single responsibility is discovering modules, resolving their dependencies, injecting them, and managing their lifecycle. The adapters make two deliberate exceptions, both because they need to be tied to module state: Paper command registration, and Folia task scheduling — see those sections above.

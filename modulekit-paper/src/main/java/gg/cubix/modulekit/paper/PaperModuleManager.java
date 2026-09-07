@@ -145,6 +145,13 @@ public class PaperModuleManager extends ModuleManager<PaperModule, PaperModuleSt
     public void registerCommands(Commands registrar, BiConsumer<CommandSourceStack, String> onBlocked) {
         for (var ctx : contexts()) {
             PaperModule pm = ctx.module();
+
+            // A context that was discovered but never instantiated has no module: it faulted
+            // during discovery, graph building or injection, or registerCommands was called
+            // before runLoad. It has no commands to contribute either way. The fault itself
+            // was already logged when it was recorded, so skip quietly.
+            if (pm == null) continue;
+
             for (CommandRegistration cr : pm.commands()) {
                 BasicCommand handler = cr.bypassModuleGuard()
                         ? cr.command()

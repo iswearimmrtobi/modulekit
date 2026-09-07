@@ -4,6 +4,6 @@
   "link": {
     "type": "generated-index",
     "title": "Platform Adapters",
-    "description": "Using ModuleKit on a concrete runtime: the Paper and Minestom adapters, and how to write your own."
+    "description": "Using ModuleKit on a concrete runtime: the Paper, Minestom and Folia adapters, and how to write your own."
   }
 }

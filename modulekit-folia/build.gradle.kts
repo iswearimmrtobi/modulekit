@@ -1,8 +1,7 @@
 plugins { `java-library` }
 
 dependencies {
-    api(project(":modulekit-api"))
-    api(project(":modulekit-core"))
+    api(project(":modulekit-paper"))
     compileOnly("io.papermc.paper:paper-api:26.2.build.119-stable")
 
     testImplementation(platform("org.junit:junit-bom:5.10.0"))

@@ -1,0 +1,303 @@
+---
+sidebar_position: 3
+title: Folia Adapter
+---
+
+# Folia Adapter
+
+`modulekit-folia` lets a ModuleKit plugin run on [Folia](https://github.com/PaperMC/Folia),
+PaperMC's fork that splits the world into regions ticking **in parallel**. It is a thin layer
+on top of [the Paper adapter](./paper.mdx) — you get everything that page describes, plus the
+one thing Folia takes away: a scheduler.
+
+The same jar runs on Folia **and** on Paper. There is no separate build, and no runtime
+branching in your module code.
+
+## Why the Paper adapter is not enough
+
+Folia removes the main thread. Each region gets its own tick loop on its own thread, and a
+region may only touch the entity, chunk and POI data it owns. `BukkitScheduler` — which exists
+to put work "on the main thread" — is therefore gone.
+
+Almost all of `modulekit-paper` is unaffected by this. Its lifecycle, listener bookkeeping and
+Brigadier command registration make no thread assumptions and work on Folia unchanged. What it
+never had was a scheduling abstraction, which meant module authors reached for
+`BukkitScheduler` themselves. This adapter fills exactly that gap.
+
+:::warning Folia will not load your plugin without this
+Folia only loads plugins whose authors have explicitly declared them compatible. Add this to
+your **`paper-plugin.yml`** (or `plugin.yml`):
+
+```yaml
+folia-supported: true
+```
+
+That file belongs to your plugin, not to ModuleKit, so the adapter cannot add it for you.
+Without it, Folia refuses the plugin outright — and note that the flag is a *claim*, not a
+guarantee: it is on you to honour the threading rules below.
+:::
+
+## The pieces
+
+| Class | Role |
+|---|---|
+| `FoliaModule` | Base class for your modules. Extends `PaperModule` and adds `scheduler()`. |
+| `FoliaModuleManager` | The manager. Extends `PaperModuleManager`; adds a plugin-scoped scheduler and platform logging. |
+| `ModuleScheduler` | The scheduling façade: `global()`, `region(…)`, `entity(…)`, `async()`. |
+| `FoliaScheduler` | The implementation. Tracks every handle it hands out. |
+| `Task` | A cancellable handle to a scheduled task. |
+| `FoliaPlatform` | Platform detection and region-ownership checks. |
+
+Everything else comes from the Paper adapter unchanged: `PaperModuleState`,
+`PaperLoadContext`, `CommandRegistration` and `ModuleAwareCommand`. A `FoliaModuleManager`
+*is* a `PaperModuleManager`, so anything that accepts one accepts the other.
+
+## `FoliaModule`
+
+Extend `FoliaModule` instead of `PaperModule`. Every hook you already know is inherited:
+
+```java title="BeaconModule.java"
+public final class BeaconModule extends FoliaModule {
+
+    public BeaconModule(JavaPlugin plugin) {
+        super(plugin);
+    }
+
+    public static ModuleDescriptor getDescriptor() {
+        return ModuleDescriptor.builder("beacon", "Beacon")
+            .requires(JavaPlugin.class)   // ← see the note below
+            .build();
+    }
+
+    @Override public ModuleDescriptor descriptor() { return getDescriptor(); }
+
+    @Override
+    public void onEnable() {
+        registerListener(new BeaconListener());                     // inherited from PaperModule
+        scheduler().global().runRepeating(this::sweep, 0L, 200L);   // added here
+    }
+
+    private void relight(Location where) {
+        scheduler().region(where).run(() -> where.getBlock().setType(Material.BEACON));
+    }
+
+    @Override
+    public void onDisable() {
+        super.onDisable();   // cancels tasks AND unregisters listeners — keep this
+    }
+}
+```
+
+:::note `requires(JavaPlugin.class)` is mandatory
+`FoliaModule`'s constructor takes the owning `JavaPlugin`, and ModuleKit's injector only looks
+for a constructor when `requires` is non-empty — with an empty `requires` it takes the
+**no-arg** path and the module faults with `failed to instantiate no-arg module`. So a module
+whose only dependency is the plugin must still list it:
+
+```java
+ModuleDescriptor.builder("beacon", "Beacon").requires(JavaPlugin.class).build()
+```
+
+Because the constructor is not no-arg, discovery also cannot instantiate the class to read its
+descriptor — which is why the static `getDescriptor()` pattern is required. See
+[Discovery](../concepts/discovery.mdx#resolving-the-descriptor).
+:::
+
+## Choosing a scheduler
+
+This is the decision that matters on Folia. The scope you pick determines which thread your
+code runs on, and therefore which data it may legally touch.
+
+| You want to… | Use | Runs on |
+|---|---|---|
+| Change a block, or edit the world at a location | `scheduler().region(location)` | the region owning that location |
+| Do anything to an entity or a player | `scheduler().entity(entity)` | the region owning that entity, following it as it moves |
+| Touch server-wide state with no location — weather, time, the player list | `scheduler().global()` | the global region |
+| Read a file, hit a database, call an HTTP API | `scheduler().async()` | a pool thread, off every tick loop |
+
+:::danger Never use the region scope for entities
+Entities move between regions. `region(location)` resolves the owner **once**, at schedule
+time, so by the time a delayed task fires the entity may belong to a different region — and
+touching it from the wrong one corrupts state. Entities carry their own scheduler for exactly
+this reason; use `entity(…)`.
+:::
+
+Each scope offers the same four shapes, in ticks:
+
+```java
+scheduler().global().run(task);                            // next tick, fire-and-forget
+Task t = scheduler().global().runNow(task);                // next tick, cancellable
+Task t = scheduler().global().runLater(task, 40L);         // once, after 40 ticks
+Task t = scheduler().global().runRepeating(task, 0L, 20L); // every second, starting now
+```
+
+`async()` is the exception: it measures real time, not ticks, so it takes a `TimeUnit`.
+
+```java
+scheduler().async().runLater(this::flush, 250L, TimeUnit.MILLISECONDS);
+scheduler().async().runRepeating(this::poll, 0L, 5L, TimeUnit.MINUTES);
+```
+
+### The entity scope and retired entities
+
+An entity can be removed before a task scheduled against it fires. Folia calls this being
+*retired*, and simply drops the task. Pass a second callback if you need to know:
+
+```java
+scheduler().entity(player).runLater(
+    () -> player.sendMessage("Welcome back!"),
+    () -> plugin.getLogger().info("Player left before the greeting fired"),
+    100L);
+```
+
+If the entity is **already** gone at schedule time, nothing is scheduled and you get back
+`Task.none()` — a handle that reports `isCancelled() == true` and whose `cancel()` is a no-op.
+The adapter never hands you `null`.
+
+## Task lifetime
+
+Tasks are tracked per module, exactly the way `registerListener` already tracks listeners, and
+cancelled together when the module is disabled:
+
+```java title="inside FoliaModule"
+@Override
+public void onDisable() {
+    scheduler.cancelAll();   // every task this module started
+    super.onDisable();       // every listener this module registered
+}
+```
+
+:::warning The `super.onDisable()` rule now covers two things
+If you override `onDisable()`, call `super.onDisable()`. Forgetting it used to leak listeners;
+it now leaks running tasks too. A repeating task that survives a disable keeps firing against a
+module that is no longer enabled — and after
+[`loadAndEnableModule`](./paper.mdx#runtime-toggling) you would have two copies of it running.
+:::
+
+### Module-scoped vs plugin-scoped
+
+There are two schedulers, and the difference is when their tasks die:
+
+| | Reach it via | Cancelled when |
+|---|---|---|
+| **Module-scoped** | `scheduler()` inside a `FoliaModule` | that one module is disabled |
+| **Plugin-scoped** | `FoliaModuleManager#scheduler()`, or inject `ModuleScheduler` | the whole plugin shuts down |
+
+Prefer the module-scoped one. The plugin-scoped one exists for plain services — objects
+registered with `register(Service.class, impl)` that are not modules themselves and so have no
+`scheduler()` of their own. The manager registers it as an external service, so a module can
+also ask for it by constructor injection:
+
+```java
+public ReportingModule(JavaPlugin plugin, ModuleScheduler scheduler) { … }
+
+ModuleDescriptor.builder("reporting", "Reporting")
+    .requires(JavaPlugin.class, ModuleScheduler.class)
+    .build();
+```
+
+A task that throws is logged and contained rather than allowed to escape into the tick loop —
+an uncaught exception on a Folia region thread is considerably more disruptive than one on
+Paper's single main thread.
+
+## Thread safety
+
+Scheduling correctly gets you onto the right thread. Staying correct once you are there is
+still your job.
+
+### Check ownership when you are unsure
+
+```java
+if (FoliaPlatform.isOwnedByCurrentRegion(location)) {
+    location.getBlock().setType(Material.STONE);   // safe: we own this region
+} else {
+    scheduler().region(location).run(() -> location.getBlock().setType(Material.STONE));
+}
+```
+
+`FoliaPlatform` also offers `isOwnedByCurrentRegion(Entity)`, `(Block)`,
+`(World, chunkX, chunkZ)` and `isGlobalTickThread()`. On Paper these answer for the single main
+thread, so the same guard is correct on both platforms.
+
+### APIs Folia does not support
+
+Avoid these regardless of which scheduler you are on:
+
+- **`Entity#teleport`** — use `teleportAsync`, which returns a `CompletableFuture<Boolean>`.
+- **All scoreboard operations.**
+- **World loading and unloading.**
+- **Portal interactions and player respawn.**
+
+### Shared state is now genuinely concurrent
+
+A field on your module can be written from several region threads at once. Collections that
+were safe under Paper's single main thread no longer are — use `ConcurrentHashMap`,
+`AtomicLong` and friends, or confine the state to one scope. The same applies to files under
+`ctx.dataFolder()`: two regions can write at once, and nothing serialises them for you.
+
+### Detecting the platform
+
+```java
+if (FoliaPlatform.isFolia()) { … }
+FoliaPlatform.describe();   // "Folia (regionised multithreading)" or "Paper"
+```
+
+You should rarely need this — the schedulers exist on both platforms — but it is there for
+logging, or for picking a genuinely different algorithm. `FoliaModuleManager` already logs the
+detected platform when it is constructed.
+
+## Wiring the plugin
+
+Identical to the Paper adapter, with `FoliaModuleManager` in place of `PaperModuleManager`:
+
+```java title="MyPlugin.java"
+public final class MyPlugin extends JavaPlugin {
+
+    private FoliaModuleManager modules;
+
+    @Override
+    public void onLoad() {
+        modules = new FoliaModuleManager(this);
+        modules.discover(getClass().getClassLoader());
+        LoadResult result = modules.runLoad();
+        if (!result.isClean()) {
+            result.faulted().forEach(f ->
+                getLogger().severe("[" + f.moduleId() + "] " + f.reason()));
+        }
+    }
+
+    @Override public void onEnable()  { modules.runEnable(); }
+    @Override public void onDisable() { modules.runDisable(); }
+}
+```
+
+Commands work exactly as they do on Paper — declare them with `commands()` and register them
+from the Brigadier lifecycle event:
+
+```java
+getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, event ->
+    modules.registerCommands(event.registrar(), (source, moduleId) ->
+        source.getSender().sendMessage("That feature is currently disabled.")));
+```
+
+## Installation
+
+```kotlin title="build.gradle.kts"
+repositories {
+    mavenCentral()
+    maven("https://repo.papermc.io/repository/maven-public/")
+}
+
+dependencies {
+    implementation("gg.cubix:modulekit-folia:1.2.0")   // brings -paper, -core and -api with it
+    compileOnly("io.papermc.paper:paper-api:26.2.build.119-stable")
+}
+```
+
+You compile against `paper-api` on both platforms — it ships the regionised scheduler contracts
+that Folia implements, so **no `folia-api` dependency is needed**.
+
+## Continue
+
+- [Paper adapter](./paper.mdx) — the lifecycle, listeners and commands this page builds on.
+- [Writing your own adapter](./custom-adapter.mdx) — build one for any runtime.
