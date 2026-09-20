@@ -28,16 +28,16 @@ This command generates static content into the `build` directory and can be serv
 
 ## Deployment
 
-Using SSH:
+The site is deployed automatically to <https://modulekit.cubix.gg> by the
+`Deploy Docs` GitHub Actions workflow (`.github/workflows/deploy-docs.yml`)
+on every push to `master` that touches `docs/`. Pull requests run the same
+build without deploying, so broken links fail before they reach `master`.
+
+To check a production build locally before pushing:
 
 ```bash
-USE_SSH=true npm run deploy
+npm run build && npm run serve
 ```
 
-Not using SSH:
-
-```bash
-GIT_USER=<Your GitHub username> npm run deploy
-```
-
-If you are using GitHub Pages for hosting, this command is a convenient way to build the website and push to the `gh-pages` branch.
+The custom domain is pinned by `static/CNAME`; do not delete that file or the
+domain is dropped on the next deploy.
